@@ -631,7 +631,7 @@ func certNeedsUpdate(a, b *cmapi.Certificate) bool {
 }
 
 // setIssuerSpecificConfig configures given Certificate's annotation by reading
-// two Ingress-specific annotations.
+// three Ingress-specific annotations.
 //
 // (1)
 // The edit-in-place Ingress annotation allows the use of Ingress
@@ -656,6 +656,17 @@ func certNeedsUpdate(a, b *cmapi.Certificate) bool {
 // configures the Certificate using the override-ingress-class annotation:
 //
 //	acme.cert-manager.io/http01-override-ingress-class: traefik
+//
+// (3)
+// The ingress-ingressclassname Ingress annotation allows users to override the
+// Issuer's acme.solvers[0].http01.ingress.ingressClassName. For example, on the
+// Ingress:
+//
+//	acme.cert-manager.io/http01-ingress-ingressclassname: nginx
+//
+// configures the Certificate using the override-ingress-ingressclassname annotation:
+//
+//	acme.cert-manager.io/http01-override-ingress-ingressclassname: nginx
 func setIssuerSpecificConfig(crt *cmapi.Certificate, ingLike metav1.Object) {
 	ingAnnotations := ingLike.GetAnnotations()
 	if ingAnnotations == nil {
@@ -676,11 +687,19 @@ func setIssuerSpecificConfig(crt *cmapi.Certificate, ingLike metav1.Object) {
 	}
 
 	ingressClassVal, hasIngressClassVal := ingAnnotations[cmapi.IngressACMEIssuerHTTP01IngressClassAnnotationKey]
-	if hasIngressClassVal {
+	ingressClassNameVal, hasIngressClassNameVal := ingAnnotations[cmapi.IngressACMEIssuerHTTP01IngressClassNameAnnotationKey]
+
+	if hasIngressClassVal && ingressClassVal != "" {
 		if crt.Annotations == nil {
 			crt.Annotations = make(map[string]string)
 		}
 		crt.Annotations[cmacme.ACMECertificateHTTP01IngressClassOverride] = ingressClassVal
+	}
+	if hasIngressClassNameVal && ingressClassNameVal != "" {
+		if crt.Annotations == nil {
+			crt.Annotations = make(map[string]string)
+		}
+		crt.Annotations[cmacme.ACMECertificateHTTP01IngressClassNameOverride] = ingressClassNameVal
 	}
 
 	ingLike.SetAnnotations(ingAnnotations)
