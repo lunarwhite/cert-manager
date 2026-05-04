@@ -435,8 +435,9 @@ func Test_controller_ProcessItem(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			// This is the default backoff duration set by the config API.
+			// These are the default backoff durations set by the config API.
 			w.certificateRequestMinimumBackoffDuration = 1 * time.Hour
+			w.certificateRequestMaximumBackoffDuration = 32 * time.Hour
 
 			gotShouldReissueCalled := false
 			w.shouldReissue = func(i policies.Input) (string, string, bool) {
@@ -518,11 +519,12 @@ func Test_shouldBackoffReissuingOnFailure(t *testing.T) {
 	}
 
 	tests := map[string]struct {
-		givenCert       *cmapi.Certificate
-		givenNextCR     *cmapi.CertificateRequest
-		wantBackoff     bool
-		backoffDuration time.Duration
-		wantDelay       time.Duration
+		givenCert          *cmapi.Certificate
+		givenNextCR        *cmapi.CertificateRequest
+		wantBackoff        bool
+		backoffDuration    time.Duration
+		maxBackoffDuration time.Duration
+		wantDelay          time.Duration
 	}{
 		"no need to backoff from reissuing when the input request is nil": {
 			givenCert:   gen.Certificate("test", gen.SetCertificateNamespace("testns")),
@@ -744,7 +746,7 @@ func Test_shouldBackoffReissuingOnFailure(t *testing.T) {
 			)),
 			wantBackoff: false,
 		},
-		"should back off from reissuing for 32 hours if there were 100 failed issuances, last one 0 minutes ago": {
+		"should back off from reissuing for 32 hours if there were 100 failed issuances (overflow capped at max), last one 0 minutes ago": {
 			givenCert: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
 				gen.SetCertificateUID("cert-1-uid"),
 				gen.SetCertificateRevision(1),
@@ -868,13 +870,87 @@ func Test_shouldBackoffReissuingOnFailure(t *testing.T) {
 			wantBackoff:     false,
 			backoffDuration: 15 * time.Minute,
 		},
+		"should cap at 4h when maxBackoff=4h and failedIssuanceAttempts=6 (computed delay would be 32h)": {
+			givenCert: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+				gen.SetCertificateLastFailureTime(metav1.NewTime(clock.Now())),
+				gen.SetCertificateIssuanceAttempts(ptr.To(6)),
+			),
+			givenNextCR: createCertificateRequestOrPanic(gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+			)),
+			wantBackoff:        true,
+			maxBackoffDuration: 4 * time.Hour,
+			wantDelay:          4 * time.Hour,
+		},
+		"should use 1h when maxBackoff=4h and failedIssuanceAttempts=1 (computed delay=1h, below cap)": {
+			givenCert: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+				gen.SetCertificateLastFailureTime(metav1.NewTime(clock.Now())),
+				gen.SetCertificateIssuanceAttempts(ptr.To(1)),
+			),
+			givenNextCR: createCertificateRequestOrPanic(gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+			)),
+			wantBackoff:        true,
+			maxBackoffDuration: 4 * time.Hour,
+			wantDelay:          1 * time.Hour,
+		},
+		"should cap at 1h when min=1h max=1h (constant backoff, failedIssuanceAttempts=6)": {
+			givenCert: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+				gen.SetCertificateLastFailureTime(metav1.NewTime(clock.Now())),
+				gen.SetCertificateIssuanceAttempts(ptr.To(6)),
+			),
+			givenNextCR: createCertificateRequestOrPanic(gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+			)),
+			wantBackoff:        true,
+			backoffDuration:    1 * time.Hour,
+			maxBackoffDuration: 1 * time.Hour,
+			wantDelay:          1 * time.Hour,
+		},
+		// math.Pow(2, >62) overflows time.Duration; the >62 guard in
+		// shouldBackoffReissuingOnFailure caps at maxDelay instead.
+		"should cap at max backoff for overflow giant attempt counts (delay overflows to negative, capped at max)": {
+			givenCert: gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+				gen.SetCertificateLastFailureTime(metav1.NewTime(clock.Now())),
+				gen.SetCertificateIssuanceAttempts(ptr.To(100)),
+			),
+			givenNextCR: createCertificateRequestOrPanic(gen.Certificate("cert-1", gen.SetCertificateNamespace("testns"),
+				gen.SetCertificateUID("cert-1-uid"),
+				gen.SetCertificateRevision(1),
+				gen.SetCertificateDNSNames("example.com"),
+			)),
+			wantBackoff:        true,
+			maxBackoffDuration: 4 * time.Hour,
+			wantDelay:          4 * time.Hour,
+		},
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
 			if test.backoffDuration == 0 {
 				test.backoffDuration = 1 * time.Hour
 			}
-			gotBackoff, gotDelay := shouldBackoffReissuingOnFailure(testr.New(t), clock, test.givenCert, test.givenNextCR, test.backoffDuration)
+			if test.maxBackoffDuration == 0 {
+				test.maxBackoffDuration = 32 * time.Hour
+			}
+			gotBackoff, gotDelay := shouldBackoffReissuingOnFailure(testr.New(t), clock, test.givenCert, test.givenNextCR, test.backoffDuration, test.maxBackoffDuration)
 			assert.Equal(t, test.wantBackoff, gotBackoff)
 			assert.Equal(t, test.wantDelay, gotDelay)
 		})
