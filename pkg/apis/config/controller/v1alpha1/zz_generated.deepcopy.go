@@ -167,6 +167,11 @@ func (in *ControllerConfiguration) DeepCopyInto(out *ControllerConfiguration) {
 		*out = new(sharedv1alpha1.Duration)
 		**out = **in
 	}
+	if in.CertificateRequestMaximumBackoffDuration != nil {
+		in, out := &in.CertificateRequestMaximumBackoffDuration, &out.CertificateRequestMaximumBackoffDuration
+		*out = new(sharedv1alpha1.Duration)
+		**out = **in
+	}
 	return
 }
 
