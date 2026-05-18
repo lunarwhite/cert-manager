@@ -18,6 +18,7 @@ package issuing
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -38,6 +39,50 @@ import (
 	testcrypto "github.com/cert-manager/cert-manager/test/unit/crypto"
 	"github.com/cert-manager/cert-manager/test/unit/gen"
 )
+
+// expectedApplyStatusAction constructs the expected PatchAction for a Server-Side
+// Apply status subresource call. It builds the ApplyPayload JSON matching
+// exactly what the controller sends: only structured status fields and the
+// Issuing condition (never raw Status copy).
+func expectedApplyStatusAction(crt *cmapi.Certificate) testpkg.Action {
+	// The controller only sends a subset of status fields in ApplyStatus:
+	// Revision, LastFailureTime, FailedIssuanceAttempts, and Conditions.
+	// We extract only the Issuing condition to match that behaviour.
+	var conditions []cmapi.CertificateCondition
+	for _, c := range crt.Status.Conditions {
+		if c.Type == cmapi.CertificateConditionIssuing {
+			conditions = []cmapi.CertificateCondition{c}
+			break
+		}
+	}
+
+	applyObj := &cmapi.Certificate{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       cmapi.CertificateKind,
+			APIVersion: cmapi.SchemeGroupVersion.Identifier(),
+		},
+		ObjectMeta: metav1.ObjectMeta{Namespace: crt.Namespace, Name: crt.Name},
+		Status: cmapi.CertificateStatus{
+			Revision:               crt.Status.Revision,
+			LastFailureTime:        crt.Status.LastFailureTime,
+			FailedIssuanceAttempts: crt.Status.FailedIssuanceAttempts,
+			Conditions:             conditions,
+		},
+	}
+	patchBytes, err := json.Marshal(applyObj)
+	if err != nil {
+		panic(err)
+	}
+	return testpkg.NewAction(coretesting.NewPatchSubresourceActionWithOptions(
+		cmapi.SchemeGroupVersion.WithResource("certificates"),
+		crt.Namespace,
+		crt.Name,
+		types.ApplyPatchType,
+		patchBytes,
+		metav1.PatchOptions{Force: new(true), FieldManager: testpkg.FieldManager},
+		"status",
+	))
+}
 
 var (
 	fixedClockStart = time.Now()
@@ -276,10 +321,7 @@ func TestIssuingController(t *testing.T) {
 					},
 				},
 				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
-						cmapi.SchemeGroupVersion.WithResource("certificates"),
-						"status",
-						exampleBundle.Certificate.Namespace,
+					expectedApplyStatusAction(
 						gen.CertificateFrom(exampleBundle.Certificate,
 							gen.SetCertificateStatusCondition(cmapi.CertificateCondition{
 								Type:               cmapi.CertificateConditionIssuing,
@@ -292,7 +334,7 @@ func TestIssuingController(t *testing.T) {
 							gen.SetCertificateLastFailureTime(metaFixedClockStart),
 							gen.SetCertificateIssuanceAttempts(new(1)),
 						),
-					)),
+					),
 				},
 				ExpectedEvents: []string{
 					"Warning Failed The certificate request has failed to complete and will be retried: The certificate request failed because of reasons",
@@ -328,10 +370,7 @@ func TestIssuingController(t *testing.T) {
 					},
 				},
 				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
-						cmapi.SchemeGroupVersion.WithResource("certificates"),
-						"status",
-						exampleBundle.Certificate.Namespace,
+					expectedApplyStatusAction(
 						gen.CertificateFrom(exampleBundle.Certificate,
 							gen.SetCertificateStatusCondition(cmapi.CertificateCondition{
 								Type:               cmapi.CertificateConditionIssuing,
@@ -344,7 +383,7 @@ func TestIssuingController(t *testing.T) {
 							gen.SetCertificateLastFailureTime(metaFixedClockStart),
 							gen.SetCertificateIssuanceAttempts(new(5)),
 						),
-					)),
+					),
 				},
 				ExpectedEvents: []string{
 					"Warning Failed The certificate request has failed to complete and will be retried: The certificate request failed because of reasons",
@@ -492,14 +531,19 @@ func TestIssuingController(t *testing.T) {
 					},
 				},
 				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
-						cmapi.SchemeGroupVersion.WithResource("certificates"),
-						"status",
-						exampleBundle.Certificate.Namespace,
+					expectedApplyStatusAction(
 						gen.CertificateFrom(exampleBundle.Certificate,
 							gen.SetCertificateRevision(2),
+							gen.SetCertificateStatusCondition(cmapi.CertificateCondition{
+								Type:               cmapi.CertificateConditionIssuing,
+								Status:             cmmeta.ConditionFalse,
+								Reason:             "Issued",
+								Message:            "The certificate has been successfully issued",
+								LastTransitionTime: &metaFixedClockStart,
+								ObservedGeneration: 3,
+							}),
 						),
-					)),
+					),
 				},
 				ExpectedEvents: []string{
 					"Normal Issuing The certificate has been successfully issued",
@@ -550,14 +594,19 @@ func TestIssuingController(t *testing.T) {
 					},
 				},
 				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
-						cmapi.SchemeGroupVersion.WithResource("certificates"),
-						"status",
-						exampleBundle.Certificate.Namespace,
+					expectedApplyStatusAction(
 						gen.CertificateFrom(exampleBundle.Certificate,
 							gen.SetCertificateRevision(2),
+							gen.SetCertificateStatusCondition(cmapi.CertificateCondition{
+								Type:               cmapi.CertificateConditionIssuing,
+								Status:             cmmeta.ConditionFalse,
+								Reason:             "Issued",
+								Message:            "The certificate has been successfully issued",
+								LastTransitionTime: &metaFixedClockStart,
+								ObservedGeneration: 3,
+							}),
 						),
-					)),
+					),
 				},
 				ExpectedEvents: []string{
 					"Normal Issuing The certificate has been successfully issued",
@@ -607,14 +656,19 @@ func TestIssuingController(t *testing.T) {
 					},
 				},
 				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
-						cmapi.SchemeGroupVersion.WithResource("certificates"),
-						"status",
-						exampleBundle.Certificate.Namespace,
+					expectedApplyStatusAction(
 						gen.CertificateFrom(exampleBundle.Certificate,
 							gen.SetCertificateRevision(2),
+							gen.SetCertificateStatusCondition(cmapi.CertificateCondition{
+								Type:               cmapi.CertificateConditionIssuing,
+								Status:             cmmeta.ConditionFalse,
+								Reason:             "Issued",
+								Message:            "The certificate has been successfully issued",
+								LastTransitionTime: &metaFixedClockStart,
+								ObservedGeneration: 3,
+							}),
 						),
-					)),
+					),
 				},
 				ExpectedEvents: []string{
 					"Normal Issuing The certificate has been successfully issued",
@@ -665,14 +719,19 @@ func TestIssuingController(t *testing.T) {
 					},
 				},
 				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
-						cmapi.SchemeGroupVersion.WithResource("certificates"),
-						"status",
-						exampleBundle.Certificate.Namespace,
+					expectedApplyStatusAction(
 						gen.CertificateFrom(exampleBundle.Certificate,
 							gen.SetCertificateRevision(2),
+							gen.SetCertificateStatusCondition(cmapi.CertificateCondition{
+								Type:               cmapi.CertificateConditionIssuing,
+								Status:             cmmeta.ConditionFalse,
+								Reason:             "Issued",
+								Message:            "The certificate has been successfully issued",
+								LastTransitionTime: &metaFixedClockStart,
+								ObservedGeneration: 3,
+							}),
 						),
-					)),
+					),
 				},
 				ExpectedEvents: []string{
 					"Normal Issuing The certificate has been successfully issued",
@@ -946,17 +1005,22 @@ func TestIssuingController(t *testing.T) {
 					},
 				},
 				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
-						cmapi.SchemeGroupVersion.WithResource("certificates"),
-						"status",
-						exampleBundle.Certificate.Namespace,
+					expectedApplyStatusAction(
 						gen.CertificateFrom(exampleBundle.Certificate,
 							gen.AddCertificateAnnotations(map[string]string{
 								cmapi.IssueTemporaryCertificateAnnotation: "true",
 							}),
 							gen.SetCertificateRevision(2),
+							gen.SetCertificateStatusCondition(cmapi.CertificateCondition{
+								Type:               cmapi.CertificateConditionIssuing,
+								Status:             cmmeta.ConditionFalse,
+								Reason:             "Issued",
+								Message:            "The certificate has been successfully issued",
+								LastTransitionTime: &metaFixedClockStart,
+								ObservedGeneration: 3,
+							}),
 						),
-					)),
+					),
 				},
 				ExpectedEvents: []string{
 					"Normal Issuing The certificate has been successfully issued",
@@ -1005,10 +1069,7 @@ func TestIssuingController(t *testing.T) {
 					},
 				},
 				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
-						cmapi.SchemeGroupVersion.WithResource("certificates"),
-						"status",
-						exampleBundle.Certificate.Namespace,
+					expectedApplyStatusAction(
 						gen.CertificateFrom(exampleBundle.Certificate,
 							gen.AddCertificateAnnotations(map[string]string{
 								cmapi.IssueTemporaryCertificateAnnotation: "true",
@@ -1024,7 +1085,7 @@ func TestIssuingController(t *testing.T) {
 							gen.SetCertificateLastFailureTime(metaFixedClockStart),
 							gen.SetCertificateIssuanceAttempts(new(1)),
 						),
-					)),
+					),
 				},
 				ExpectedEvents: []string{
 					"Warning Failed The certificate request has failed to complete and will be retried: The certificate request failed because of reasons",
@@ -1060,10 +1121,7 @@ func TestIssuingController(t *testing.T) {
 					},
 				},
 				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
-						cmapi.SchemeGroupVersion.WithResource("certificates"),
-						"status",
-						exampleBundle.Certificate.Namespace,
+					expectedApplyStatusAction(
 						gen.CertificateFrom(exampleBundle.Certificate,
 							gen.SetCertificateStatusCondition(cmapi.CertificateCondition{
 								Type:               cmapi.CertificateConditionIssuing,
@@ -1076,7 +1134,7 @@ func TestIssuingController(t *testing.T) {
 							gen.SetCertificateLastFailureTime(metaFixedClockStart),
 							gen.SetCertificateIssuanceAttempts(new(1)),
 						),
-					)),
+					),
 				},
 				ExpectedEvents: []string{
 					"Warning DeniedReason The certificate request has failed to complete and will be retried: The certificate request has been denied",
@@ -1118,10 +1176,7 @@ func TestIssuingController(t *testing.T) {
 					},
 				},
 				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
-						cmapi.SchemeGroupVersion.WithResource("certificates"),
-						"status",
-						exampleBundle.Certificate.Namespace,
+					expectedApplyStatusAction(
 						gen.CertificateFrom(exampleBundle.Certificate,
 							gen.SetCertificateStatusCondition(cmapi.CertificateCondition{
 								Type:               cmapi.CertificateConditionIssuing,
@@ -1134,7 +1189,7 @@ func TestIssuingController(t *testing.T) {
 							gen.SetCertificateLastFailureTime(metaFixedClockStart),
 							gen.SetCertificateIssuanceAttempts(new(1)),
 						),
-					)),
+					),
 				},
 				ExpectedEvents: []string{
 					"Warning DeniedReason The certificate request has failed to complete and will be retried: The certificate request has been denied",
@@ -1176,10 +1231,7 @@ func TestIssuingController(t *testing.T) {
 					},
 				},
 				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
-						cmapi.SchemeGroupVersion.WithResource("certificates"),
-						"status",
-						exampleBundle.Certificate.Namespace,
+					expectedApplyStatusAction(
 						gen.CertificateFrom(exampleBundle.Certificate,
 							gen.SetCertificateStatusCondition(cmapi.CertificateCondition{
 								Type:               cmapi.CertificateConditionIssuing,
@@ -1192,7 +1244,7 @@ func TestIssuingController(t *testing.T) {
 							gen.SetCertificateLastFailureTime(metaFixedClockStart),
 							gen.SetCertificateIssuanceAttempts(new(1)),
 						),
-					)),
+					),
 				},
 				ExpectedEvents: []string{
 					"Warning DeniedReason The certificate request has failed to complete and will be retried: The certificate request has been denied",
@@ -1228,10 +1280,7 @@ func TestIssuingController(t *testing.T) {
 					},
 				},
 				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
-						cmapi.SchemeGroupVersion.WithResource("certificates"),
-						"status",
-						exampleBundle.Certificate.Namespace,
+					expectedApplyStatusAction(
 						gen.CertificateFrom(exampleBundle.Certificate,
 							gen.SetCertificateStatusCondition(cmapi.CertificateCondition{
 								Type:               cmapi.CertificateConditionIssuing,
@@ -1244,7 +1293,7 @@ func TestIssuingController(t *testing.T) {
 							gen.SetCertificateLastFailureTime(metaFixedClockStart),
 							gen.SetCertificateIssuanceAttempts(new(1)),
 						),
-					)),
+					),
 				},
 				ExpectedEvents: []string{
 					"Warning InvalidRequest The certificate request has failed to complete and will be retried: The certificate request is invalid",
@@ -1286,10 +1335,7 @@ func TestIssuingController(t *testing.T) {
 					},
 				},
 				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
-						cmapi.SchemeGroupVersion.WithResource("certificates"),
-						"status",
-						exampleBundle.Certificate.Namespace,
+					expectedApplyStatusAction(
 						gen.CertificateFrom(exampleBundle.Certificate,
 							gen.SetCertificateStatusCondition(cmapi.CertificateCondition{
 								Type:               cmapi.CertificateConditionIssuing,
@@ -1302,7 +1348,7 @@ func TestIssuingController(t *testing.T) {
 							gen.SetCertificateLastFailureTime(metaFixedClockStart),
 							gen.SetCertificateIssuanceAttempts(new(1)),
 						),
-					)),
+					),
 				},
 				ExpectedEvents: []string{
 					"Warning InvalidRequest The certificate request has failed to complete and will be retried: The certificate request is invalid",
@@ -1344,10 +1390,7 @@ func TestIssuingController(t *testing.T) {
 					},
 				},
 				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
-						cmapi.SchemeGroupVersion.WithResource("certificates"),
-						"status",
-						exampleBundle.Certificate.Namespace,
+					expectedApplyStatusAction(
 						gen.CertificateFrom(exampleBundle.Certificate,
 							gen.SetCertificateStatusCondition(cmapi.CertificateCondition{
 								Type:               cmapi.CertificateConditionIssuing,
@@ -1360,7 +1403,7 @@ func TestIssuingController(t *testing.T) {
 							gen.SetCertificateLastFailureTime(metaFixedClockStart),
 							gen.SetCertificateIssuanceAttempts(new(1)),
 						),
-					)),
+					),
 				},
 				ExpectedEvents: []string{
 					"Warning InvalidRequest The certificate request has failed to complete and will be retried: The certificate request is invalid",
@@ -1391,10 +1434,7 @@ func TestIssuingController(t *testing.T) {
 					},
 				},
 				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
-						cmapi.SchemeGroupVersion.WithResource("certificates"),
-						"status",
-						exampleBundle.Certificate.Namespace,
+					expectedApplyStatusAction(
 						gen.CertificateFrom(exampleBundle.Certificate,
 							gen.SetCertificateStatusCondition(cmapi.CertificateCondition{
 								Type:               cmapi.CertificateConditionIssuing,
@@ -1407,7 +1447,7 @@ func TestIssuingController(t *testing.T) {
 							gen.SetCertificateLastFailureTime(metaFixedClockStart),
 							gen.SetCertificateIssuanceAttempts(new(1)),
 						),
-					)),
+					),
 				},
 				ExpectedEvents: []string{
 					"Warning InvalidCertificate The certificate request has failed to complete and will be retried: Issuer returned a certificate with a public key that does not match the CSR. This usually indicates a misconfigured issuer.",
@@ -1441,10 +1481,7 @@ func TestIssuingController(t *testing.T) {
 					},
 				},
 				ExpectedActions: []testpkg.Action{
-					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
-						cmapi.SchemeGroupVersion.WithResource("certificates"),
-						"status",
-						exampleBundle.Certificate.Namespace,
+					expectedApplyStatusAction(
 						gen.CertificateFrom(exampleBundle.Certificate,
 							gen.SetCertificateStatusCondition(cmapi.CertificateCondition{
 								Type:               cmapi.CertificateConditionIssuing,
@@ -1457,7 +1494,7 @@ func TestIssuingController(t *testing.T) {
 							gen.SetCertificateLastFailureTime(metaFixedClockStart),
 							gen.SetCertificateIssuanceAttempts(new(1)),
 						),
-					)),
+					),
 				},
 				ExpectedEvents: []string{
 					"Warning InvalidCertificate The certificate request has failed to complete and will be retried: Issuer returned an already expired certificate (notAfter: " + fixedClockStart.Add(-1*time.Hour).UTC().Format(time.RFC3339) + "). This usually indicates an expired CA certificate in the issuer.",

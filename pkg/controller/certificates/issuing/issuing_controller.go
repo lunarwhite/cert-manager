@@ -27,14 +27,15 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/csaupgrade"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/utils/clock"
 
 	internalcertificates "github.com/cert-manager/cert-manager/internal/controller/certificates"
 	"github.com/cert-manager/cert-manager/internal/controller/certificates/policies"
-	"github.com/cert-manager/cert-manager/internal/controller/feature"
 	internalinformers "github.com/cert-manager/cert-manager/internal/informers"
 	apiutil "github.com/cert-manager/cert-manager/pkg/api/util"
 	cmapi "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
@@ -45,7 +46,6 @@ import (
 	"github.com/cert-manager/cert-manager/pkg/controller/certificates"
 	"github.com/cert-manager/cert-manager/pkg/controller/certificates/issuing/internal"
 	logf "github.com/cert-manager/cert-manager/pkg/logs"
-	utilfeature "github.com/cert-manager/cert-manager/pkg/util/feature"
 	utilkube "github.com/cert-manager/cert-manager/pkg/util/kube"
 	utilpki "github.com/cert-manager/cert-manager/pkg/util/pki"
 	"github.com/cert-manager/cert-manager/pkg/util/predicate"
@@ -490,40 +490,45 @@ func (c *controller) issueCertificate(ctx context.Context, nextRevision int, crt
 
 }
 
-// updateOrApplyStatus will update the controller status. If the
-// ServerSideApply feature is enabled, the managed fields will instead get
-// applied using the relevant Patch API call.
-// conditionRemove should be true if the Issuing condition has been removed by
-// this controller. If the ServerSideApply feature is enabled and condition
-// have been removed, the Issuing condition will be set to False before
-// applying.
+// updateOrApplyStatus will update the controller status using Server-Side
+// Apply. Managed fields are upgraded from CSA to SSA if required.
+// conditionRemoved should be true if the Issuing condition has been removed by
+// this controller, in which case the Issuing condition will be set to False
+// before applying.
 func (c *controller) updateOrApplyStatus(ctx context.Context, crt *cmapi.Certificate, conditionRemoved bool) error {
-	if utilfeature.DefaultFeatureGate.Enabled(feature.ServerSideApply) {
-		// TODO @joshvanl: Once we move to only server-side apply API calls,
-		// `conditionRemoved` can be removed and setting the Issuing condition to
-		// False can be moved to the `issueCertificate` func.
-		if conditionRemoved {
-			message := "The certificate has been successfully issued"
-			apiutil.SetCertificateCondition(crt, crt.Generation, cmapi.CertificateConditionIssuing, cmmeta.ConditionFalse, "Issued", message)
-		}
-
-		var conditions []cmapi.CertificateCondition
-		if cond := apiutil.GetCertificateCondition(crt, cmapi.CertificateConditionIssuing); cond != nil {
-			conditions = []cmapi.CertificateCondition{*cond}
-		}
-
-		return internalcertificates.ApplyStatus(ctx, c.client, c.fieldManager, &cmapi.Certificate{
-			ObjectMeta: metav1.ObjectMeta{Namespace: crt.Namespace, Name: crt.Name},
-			Status: cmapi.CertificateStatus{
-				Revision:        crt.Status.Revision,
-				LastFailureTime: crt.Status.LastFailureTime,
-				Conditions:      conditions,
-			},
-		})
-	} else {
-		_, err := c.client.CertmanagerV1().Certificates(crt.Namespace).UpdateStatus(ctx, crt, metav1.UpdateOptions{})
-		return err
+	// TODO @joshvanl: Once we move to only server-side apply API calls,
+	// `conditionRemoved` can be removed and setting the Issuing condition to
+	// False can be moved to the `issueCertificate` func.
+	if conditionRemoved {
+		message := "The certificate has been successfully issued"
+		apiutil.SetCertificateCondition(crt, crt.Generation, cmapi.CertificateConditionIssuing, cmmeta.ConditionFalse, "Issued", message)
 	}
+
+	var conditions []cmapi.CertificateCondition
+	if cond := apiutil.GetCertificateCondition(crt, cmapi.CertificateConditionIssuing); cond != nil {
+		conditions = []cmapi.CertificateCondition{*cond}
+	}
+
+	// upgrade managed fields from CSA to SSA if required
+	upgradePatch, err := csaupgrade.UpgradeManagedFieldsPatch(crt, sets.New(c.fieldManager), c.fieldManager, csaupgrade.Subresource("status"))
+	if err != nil {
+		return fmt.Errorf("when creating managed fields patch: %w", err)
+	}
+	if len(upgradePatch) > 0 {
+		if _, err := c.client.CertmanagerV1().Certificates(crt.Namespace).Patch(ctx, crt.Name, types.JSONPatchType, upgradePatch, metav1.PatchOptions{}, "status"); err != nil {
+			return fmt.Errorf("when patching managed fields: %w", err)
+		}
+	}
+
+	return internalcertificates.ApplyStatus(ctx, c.client, c.fieldManager, &cmapi.Certificate{
+		ObjectMeta: metav1.ObjectMeta{Namespace: crt.Namespace, Name: crt.Name},
+		Status: cmapi.CertificateStatus{
+			Revision:               crt.Status.Revision,
+			LastFailureTime:        crt.Status.LastFailureTime,
+			FailedIssuanceAttempts: crt.Status.FailedIssuanceAttempts,
+			Conditions:             conditions,
+		},
+	})
 }
 
 // controllerWrapper wraps the `controller` structure to make it implement
