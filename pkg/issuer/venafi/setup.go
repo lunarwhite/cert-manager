@@ -35,14 +35,17 @@ func (v *Venafi) Setup(ctx context.Context, issuer cmapi.GenericIssuer) (err err
 		if err != nil {
 			var authErr venaficlient.AuthFailedError
 			if errors.As(err, &authErr) {
-				msg := fmt.Sprintf("OAuth token request failed: %v", authErr.Err)
+				v.log.Error(authErr.Err, "OAuth token request failed")
+				msg := "OAuth token request failed"
 				apiutil.SetIssuerCondition(issuer, issuer.GetGeneration(), cmapi.IssuerConditionReady, cmmeta.ConditionFalse, "AuthFailed", msg)
+				// The upstream error is deliberately kept out of the returned error
 				err = errors.New(msg)
 			} else {
 				errorMessage := "Failed to setup Certificate Manager issuer"
 				v.log.Error(err, errorMessage)
-				apiutil.SetIssuerCondition(issuer, issuer.GetGeneration(), cmapi.IssuerConditionReady, cmmeta.ConditionFalse, "ErrorSetup", fmt.Sprintf("%s: %v", errorMessage, err))
-				err = fmt.Errorf("%s: %v", errorMessage, err)
+				apiutil.SetIssuerCondition(issuer, issuer.GetGeneration(), cmapi.IssuerConditionReady, cmmeta.ConditionFalse, "ErrorSetup", errorMessage)
+				// The upstream error is deliberately kept out of the returned error
+				err = errors.New(errorMessage)
 			}
 		}
 	}()

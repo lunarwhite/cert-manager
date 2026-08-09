@@ -18,7 +18,7 @@ package vault
 
 import (
 	"context"
-	"fmt"
+	"errors"
 
 	"k8s.io/klog/v2"
 
@@ -149,14 +149,16 @@ func (v *Vault) Setup(ctx context.Context, issuer v1.GenericIssuer) error {
 	client, err := vaultinternal.New(ctx, v.ResourceNamespace(issuer), v.createTokenFn, v.secretsLister, issuer, v.CanUseAmbientCredentials(issuer))
 	if err != nil {
 		logf.FromContext(ctx).V(logf.WarnLevel).Info(messageVaultClientInitFailed, "err", err, "issuer", klog.KObj(issuer))
-		apiutil.SetIssuerCondition(issuer, issuer.GetGeneration(), v1.IssuerConditionReady, cmmeta.ConditionFalse, errorVault, fmt.Sprintf("%s: %s", messageVaultClientInitFailed, err.Error()))
-		return err
+		apiutil.SetIssuerCondition(issuer, issuer.GetGeneration(), v1.IssuerConditionReady, cmmeta.ConditionFalse, errorVault, messageVaultClientInitFailed)
+		// The response body is deliberately kept out of the returned error
+		return errors.New(messageVaultClientInitFailed)
 	}
 
 	if err := client.IsVaultInitializedAndUnsealed(); err != nil {
 		logf.FromContext(ctx).V(logf.WarnLevel).Info(messageVaultInitializedAndUnsealedFailed, "err", err, "issuer", klog.KObj(issuer))
-		apiutil.SetIssuerCondition(issuer, issuer.GetGeneration(), v1.IssuerConditionReady, cmmeta.ConditionFalse, errorVault, fmt.Sprintf("%s: %s", messageVaultInitializedAndUnsealedFailed, err.Error()))
-		return err
+		apiutil.SetIssuerCondition(issuer, issuer.GetGeneration(), v1.IssuerConditionReady, cmmeta.ConditionFalse, errorVault, messageVaultInitializedAndUnsealedFailed)
+		// The response body is deliberately kept out of the returned error
+		return errors.New(messageVaultInitializedAndUnsealedFailed)
 	}
 
 	logf.FromContext(ctx).V(logf.DebugLevel).Info(messageVaultVerified, "issuer", klog.KObj(issuer))

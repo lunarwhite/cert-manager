@@ -18,6 +18,7 @@ package venafi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/Venafi/vcert/v5/pkg/endpoint"
@@ -95,7 +96,10 @@ func (v *Venafi) Sign(ctx context.Context, cr *cmapi.CertificateRequest, issuerO
 	if err != nil {
 		message := "Failed to initialise Certificate Manager client for signing"
 
-		v.reporter.Pending(cr, err, "VenafiInitError", message)
+		// err may embed the Venafi server/SDK's raw response content,
+		// attacker-influenced since spec.venafi.*.url is tenant-controlled;
+		// keep it out of the Event/condition.
+		v.reporter.Pending(cr, errors.New("see controller logs for details"), "VenafiInitError", message)
 		log.Error(err, message)
 
 		return nil, err
@@ -144,7 +148,8 @@ func (v *Venafi) Sign(ctx context.Context, cr *cmapi.CertificateRequest, issuerO
 			default:
 				message := "Failed to request certificate from Certificate Manager"
 
-				v.reporter.Failed(cr, err, "RequestError", message)
+				// Same reasoning as above: keep the raw response out of the Event/condition.
+				v.reporter.Failed(cr, errors.New("see controller logs for details"), "RequestError", message)
 				log.Error(err, message)
 
 				return nil, err
@@ -164,14 +169,18 @@ func (v *Venafi) Sign(ctx context.Context, cr *cmapi.CertificateRequest, issuerO
 		case endpoint.ErrCertificatePending, endpoint.ErrRetrieveCertificateTimeout:
 			message := "certificate still in a pending state, the request will be retried"
 
-			v.reporter.Pending(cr, err, "IssuancePending", message)
+			// Also sanitized: ErrCertificatePending.Status is raw,
+			// attacker-influenced content from the configured Venafi
+			// endpoint, hit on every poll while issuance is pending.
+			v.reporter.Pending(cr, errors.New("see controller logs for details"), "IssuancePending", message)
 			log.Error(err, message)
 			return nil, err
 
 		default:
 			message := "Failed to obtain certificate from Certificate Manager"
 
-			v.reporter.Failed(cr, err, "RetrieveError", message)
+			// Same reasoning as above: keep the raw response out of the Event/condition.
+			v.reporter.Failed(cr, errors.New("see controller logs for details"), "RetrieveError", message)
 			log.Error(err, message)
 
 			return nil, err

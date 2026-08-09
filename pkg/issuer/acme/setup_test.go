@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -322,7 +323,7 @@ func TestAcme_Setup(t *testing.T) {
 			expectedConditions: []cmapi.IssuerCondition{
 				*gen.IssuerConditionFrom(readyFalseCondition,
 					gen.SetIssuerConditionReason(errorAccountRegistrationFailed),
-					gen.SetIssuerConditionMessage(messageAccountRegistrationFailed+acmeErr450.Error())),
+					gen.SetIssuerConditionMessage(messageAccountRegistrationFailed+fmt.Sprintf("%d %s", acmeErr450.StatusCode, acmeErr450.ProblemType))),
 			},
 		},
 		"Attempt to register ACME account returns an ACME error outside of range [400,500)": {
@@ -334,7 +335,7 @@ func TestAcme_Setup(t *testing.T) {
 			expectedConditions: []cmapi.IssuerCondition{
 				*gen.IssuerConditionFrom(readyFalseCondition,
 					gen.SetIssuerConditionReason(errorAccountRegistrationFailed),
-					gen.SetIssuerConditionMessage(messageAccountRegistrationFailed+acmeErr500.Error())),
+					gen.SetIssuerConditionMessage(messageAccountRegistrationFailed+fmt.Sprintf("%d %s", acmeErr500.StatusCode, acmeErr500.ProblemType))),
 			},
 			wantsErr: true,
 		},
@@ -476,10 +477,10 @@ func TestAcme_Setup(t *testing.T) {
 				*gen.IssuerConditionFrom(readyTrueCondition,
 					gen.SetIssuerConditionStatus(cmmeta.ConditionFalse),
 					gen.SetIssuerConditionReason(errorAccountUpdateFailed),
-					gen.SetIssuerConditionMessage(fmt.Sprintf("%s%s", messageAccountUpdateFailed, acmeErr450.Error()))),
+					gen.SetIssuerConditionMessage(fmt.Sprintf("%s%s", messageAccountUpdateFailed, fmt.Sprintf("%d %s", acmeErr450.StatusCode, acmeErr450.ProblemType)))),
 			},
 			expectedEvents: []string{
-				fmt.Sprintf("%s %s %s", corev1.EventTypeWarning, errorAccountUpdateFailed, fmt.Sprintf("%s%s", messageAccountUpdateFailed, acmeErr450.Error()))},
+				fmt.Sprintf("%s %s %s", corev1.EventTypeWarning, errorAccountUpdateFailed, fmt.Sprintf("%s%s", messageAccountUpdateFailed, fmt.Sprintf("%d %s", acmeErr450.StatusCode, acmeErr450.ProblemType)))},
 		},
 		"ACME account with legacy EAB key algorithm set, spec email different from registered email and registered failed with retryable ACME Error": {
 			issuer: gen.IssuerFrom(baseIssuer,
@@ -507,10 +508,10 @@ func TestAcme_Setup(t *testing.T) {
 				*gen.IssuerConditionFrom(readyTrueCondition,
 					gen.SetIssuerConditionStatus(cmmeta.ConditionFalse),
 					gen.SetIssuerConditionReason(errorAccountUpdateFailed),
-					gen.SetIssuerConditionMessage(fmt.Sprintf("%s%s", messageAccountUpdateFailed, acmeErr500.Error()))),
+					gen.SetIssuerConditionMessage(fmt.Sprintf("%s%s", messageAccountUpdateFailed, fmt.Sprintf("%d %s", acmeErr500.StatusCode, acmeErr500.ProblemType)))),
 			},
 			expectedEvents: []string{
-				fmt.Sprintf("%s %s %s", corev1.EventTypeWarning, errorAccountUpdateFailed, fmt.Sprintf("%s%s", messageAccountUpdateFailed, acmeErr500.Error()))},
+				fmt.Sprintf("%s %s %s", corev1.EventTypeWarning, errorAccountUpdateFailed, fmt.Sprintf("%s%s", messageAccountUpdateFailed, fmt.Sprintf("%d %s", acmeErr500.StatusCode, acmeErr500.ProblemType)))},
 		},
 	}
 	for name, test := range tests {
@@ -623,6 +624,88 @@ func TestAcme_Setup(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAcme_Setup_DoesNotReflectACMEErrorDetail is a regression test ensuring
+// that acmeapi.Error's Detail field -- attacker-influenced free text from
+// the configured ACME server -- is never reflected into the returned error
+// or condition message, for both setup() code paths that observe a
+// *acmeapi.Error: registerAccount and ensureEmailUpToDate.
+//
+// This is a separate test, not folded into TestAcme_Setup's ACME-error
+// cases above, because those use acmeErr450/acmeErr500 fixtures with an
+// always-empty Detail: their exact-match assertions pin the "%d %s" format
+// but can't catch a regression that re-appends a non-empty Detail, since
+// appending "" never changes the expected string.
+func TestAcme_Setup_DoesNotReflectACMEErrorDetail(t *testing.T) {
+	const sentinel = "SENTINEL-ACME-DETAIL"
+	const email = "sentinel-test@test.com"
+	sentinelErr := &acmeapi.Error{
+		StatusCode:  500,
+		ProblemType: "urn:ietf:params:acme:error:serverInternal",
+		Detail:      sentinel,
+	}
+
+	newFixture := func(t *testing.T, email string) (Acme, cmapi.GenericIssuer) {
+		issuer := gen.Issuer("test-issuer",
+			gen.SetIssuerACMEURL(acmev2Prod),
+			gen.SetIssuerACMEEmail(email))
+		secretsClient := coreclients.NewFakeSecretsGetterFrom(coreclients.NewFakeSecretsGetter())
+		kfs := keyFromSecretMockBuilder(new(bool), mustGenerateRSAKey(t), nil)
+		ar := &fakeregistry.FakeRegistry{
+			RemoveClientFunc:        func(string) {},
+			AddClientFunc:           func(string, accounts.NewClientOptions) {},
+			IsKeyCheckSumCachedFunc: func(string, *rsa.PrivateKey) bool { return true },
+		}
+		recorder := new(controllertest.FakeRecorder)
+		return Acme{
+			resourceNamespace: func(iss cmapi.GenericIssuer) string { return iss.GetNamespace() },
+			secretsClient:     secretsClient,
+			accountRegistry:   ar,
+			keyFromSecret:     kfs,
+			recorder:          recorder,
+		}, issuer
+	}
+
+	assertSentinelAbsent := func(t *testing.T, result setupResult) {
+		t.Helper()
+		if result.err != nil && strings.Contains(strings.ToLower(result.err.Error()), strings.ToLower(sentinel)) {
+			t.Errorf("expected returned error not to contain the ACME error Detail %q, but it did: %v", sentinel, result.err)
+		}
+		if strings.Contains(strings.ToLower(result.message), strings.ToLower(sentinel)) {
+			t.Errorf("expected condition message not to contain the ACME error Detail %q, but it did: %s", sentinel, result.message)
+		}
+	}
+
+	t.Run("registerAccount", func(t *testing.T) {
+		a, issuer := newFixture(t, email)
+		a.clientBuilder = clientBuilderMock(&acmecl.FakeACME{
+			FakeRegister: func(context.Context, *acmeapi.Account, func(string) bool) (*acmeapi.Account, error) {
+				return nil, sentinelErr
+			},
+		})
+
+		result := a.setup(t.Context(), issuer)
+		assertSentinelAbsent(t, result)
+	})
+
+	t.Run("ensureEmailUpToDate", func(t *testing.T) {
+		a, issuer := newFixture(t, email)
+		a.clientBuilder = clientBuilderMock(&acmecl.FakeACME{
+			FakeRegister: func(context.Context, *acmeapi.Account, func(string) bool) (*acmeapi.Account, error) {
+				// Return an account with no Contact set, so that it does not
+				// match specEmail. This forces ensureEmailUpToDate to see a
+				// mismatch and call UpdateReg below.
+				return &acmeapi.Account{}, nil
+			},
+			FakeUpdateReg: func(context.Context, *acmeapi.Account) (*acmeapi.Account, error) {
+				return nil, sentinelErr
+			},
+		})
+
+		result := a.setup(t.Context(), issuer)
+		assertSentinelAbsent(t, result)
+	})
 }
 
 // keyFromSecretMockBuilder returns a mock implementation of keyFromSecretFunc.

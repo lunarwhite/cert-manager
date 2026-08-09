@@ -201,7 +201,7 @@ func TestSign(t *testing.T) {
 				KubeObjects:        []runtime.Object{},
 				CertManagerObjects: []runtime.Object{baseCR.DeepCopy(), baseIssuer.DeepCopy()},
 				ExpectedEvents: []string{
-					"Normal VaultInitError Failed to initialise vault client for signing: error initializing Vault client: unable to load credentials. One of: tokenSecretRef, appRoleSecretRef, clientCertificate, Kubernetes, or AWS auth must be set",
+					"Normal VaultInitError Failed to initialise vault client for signing: see controller logs for details",
 				},
 				ExpectedActions: []testpkg.Action{
 					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
@@ -213,7 +213,7 @@ func TestSign(t *testing.T) {
 								Type:               cmapi.CertificateRequestConditionReady,
 								Status:             cmmeta.ConditionFalse,
 								Reason:             cmapi.CertificateRequestReasonPending,
-								Message:            "Failed to initialise vault client for signing: error initializing Vault client: unable to load credentials. One of: tokenSecretRef, appRoleSecretRef, clientCertificate, Kubernetes, or AWS auth must be set",
+								Message:            "Failed to initialise vault client for signing: see controller logs for details",
 								LastTransitionTime: &metaFixedClockStart,
 							}),
 						),
@@ -346,7 +346,7 @@ func TestSign(t *testing.T) {
 					}),
 				)},
 				ExpectedEvents: []string{
-					"Normal VaultInitError Failed to initialise vault client for signing: failed to create vault client, temporary auth failure",
+					"Normal VaultInitError Failed to initialise vault client for signing: see controller logs for details",
 				},
 				ExpectedActions: []testpkg.Action{
 					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
@@ -358,15 +358,20 @@ func TestSign(t *testing.T) {
 								Type:               cmapi.CertificateRequestConditionReady,
 								Status:             cmmeta.ConditionFalse,
 								Reason:             cmapi.CertificateRequestReasonPending,
-								Message:            "Failed to initialise vault client for signing: failed to create vault client, temporary auth failure",
+								Message:            "Failed to initialise vault client for signing: see controller logs for details",
 								LastTransitionTime: &metaFixedClockStart,
 							}),
 						),
 					)),
 				},
 			},
+			// The error below embeds a sentinel, doubling this case as the
+			// regression test for the fix ensuring Sign never reflects the
+			// raw Vault-client-init error into the Ready condition message
+			// or any Event -- the exact-string ExpectedEvents/
+			// ExpectedActions match above/below fails if it leaks.
 			fakeVault: fakevault.New().WithNew(func(string, internalinformers.SecretLister, cmapi.GenericIssuer) (*fakevault.Vault, error) {
-				return nil, errors.New("failed to create vault client, temporary auth failure")
+				return nil, errors.New("failed to create vault client, temporary auth failure: SENTINEL-VAULT-CR-INIT")
 			}),
 			expectedErr: true,
 		},
@@ -387,7 +392,7 @@ func TestSign(t *testing.T) {
 					}),
 				)},
 				ExpectedEvents: []string{
-					"Warning SigningError Vault failed to sign certificate: failed to sign",
+					"Warning SigningError Vault failed to sign certificate: see controller logs for details",
 				},
 				ExpectedActions: []testpkg.Action{
 					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
@@ -399,7 +404,7 @@ func TestSign(t *testing.T) {
 								Type:               cmapi.CertificateRequestConditionReady,
 								Status:             cmmeta.ConditionFalse,
 								Reason:             cmapi.CertificateRequestReasonFailed,
-								Message:            "Vault failed to sign certificate: failed to sign",
+								Message:            "Vault failed to sign certificate: see controller logs for details",
 								LastTransitionTime: &metaFixedClockStart,
 							}),
 							gen.SetCertificateRequestFailureTime(metaFixedClockStart),
@@ -407,7 +412,9 @@ func TestSign(t *testing.T) {
 					)),
 				},
 			},
-			fakeVault: fakevault.New().WithSign(nil, nil, errors.New("failed to sign")),
+			// Sentinel embedded as above: doubles as the regression test for
+			// the Vault-signing-error sanitization.
+			fakeVault: fakevault.New().WithSign(nil, nil, errors.New("failed to sign: SENTINEL-VAULT-CR-SIGN")),
 		},
 		"a client with a app role secret referenced with role but failed to sign should report fail": {
 			certificateRequest: baseCR.DeepCopy(),
@@ -429,7 +436,7 @@ func TestSign(t *testing.T) {
 					}),
 				)},
 				ExpectedEvents: []string{
-					`Warning SigningError Vault failed to sign certificate: failed to sign`,
+					`Warning SigningError Vault failed to sign certificate: see controller logs for details`,
 				},
 				ExpectedActions: []testpkg.Action{
 					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(
@@ -441,7 +448,7 @@ func TestSign(t *testing.T) {
 								Type:               cmapi.CertificateRequestConditionReady,
 								Status:             cmmeta.ConditionFalse,
 								Reason:             cmapi.CertificateRequestReasonFailed,
-								Message:            "Vault failed to sign certificate: failed to sign",
+								Message:            "Vault failed to sign certificate: see controller logs for details",
 								LastTransitionTime: &metaFixedClockStart,
 							}),
 							gen.SetCertificateRequestFailureTime(metaFixedClockStart),

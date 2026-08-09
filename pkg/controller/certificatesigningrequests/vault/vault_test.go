@@ -185,6 +185,10 @@ func TestProcessItem(t *testing.T) {
 				},
 			},
 		},
+		// The error below embeds a sentinel, doubling this case as the
+		// regression test for the fix ensuring ProcessItem never reflects
+		// the raw Vault-client-init error into the recorded Event -- the
+		// exact-string ExpectedEvents match below fails if it leaks.
 		"an approved CSR where the vault client builder returns a generic error should return error to retry": {
 			csr: gen.CertificateSigningRequestFrom(baseCSR,
 				gen.SetCertificateSigningRequestStatusCondition(certificatesv1.CertificateSigningRequestCondition{
@@ -193,13 +197,13 @@ func TestProcessItem(t *testing.T) {
 				}),
 			),
 			clientBuilder: func(_ context.Context, _ string, _ func(ns string) internalvault.CreateToken, _ internalinformers.SecretLister, _ cmapi.GenericIssuer, _ bool) (internalvault.Interface, error) {
-				return nil, errors.New("generic error")
+				return nil, errors.New("generic error: SENTINEL-VAULT-CLIENTINIT-DETAIL")
 			},
 			expectedErr: true,
 			builder: &testpkg.Builder{
 				CertManagerObjects: []runtime.Object{baseIssuer.DeepCopy()},
 				ExpectedEvents: []string{
-					"Warning ErrorVaultInit Failed to initialise vault client for signing: generic error",
+					"Warning ErrorVaultInit Failed to initialise vault client for signing",
 				},
 				ExpectedActions: []testpkg.Action{
 					testpkg.NewAction(coretesting.NewCreateAction(
@@ -291,6 +295,8 @@ func TestProcessItem(t *testing.T) {
 				},
 			},
 		},
+		// Sentinel embedded as above: doubles as the regression test for
+		// the Vault-signing-error sanitization.
 		"an approved CSR which errors when invoking sign on the vault client should mark the CSR as Failed": {
 			csr: gen.CertificateSigningRequestFrom(baseCSR,
 				gen.SetCertificateSigningRequestStatusCondition(certificatesv1.CertificateSigningRequestCondition{
@@ -299,12 +305,12 @@ func TestProcessItem(t *testing.T) {
 				}),
 			),
 			clientBuilder: func(_ context.Context, _ string, _ func(ns string) internalvault.CreateToken, _ internalinformers.SecretLister, _ cmapi.GenericIssuer, _ bool) (internalvault.Interface, error) {
-				return fakevault.New().WithSign(nil, nil, errors.New("sign error")), nil
+				return fakevault.New().WithSign(nil, nil, errors.New("sign error: SENTINEL-VAULT-SIGN-DETAIL")), nil
 			},
 			builder: &testpkg.Builder{
 				CertManagerObjects: []runtime.Object{baseIssuer.DeepCopy()},
 				ExpectedEvents: []string{
-					"Warning ErrorSigning Vault failed to sign: sign error",
+					"Warning ErrorSigning Vault failed to sign",
 				},
 				ExpectedActions: []testpkg.Action{
 					testpkg.NewAction(coretesting.NewCreateAction(
@@ -343,7 +349,7 @@ func TestProcessItem(t *testing.T) {
 								Type:               certificatesv1.CertificateFailed,
 								Status:             corev1.ConditionTrue,
 								Reason:             "ErrorSigning",
-								Message:            "Vault failed to sign: sign error",
+								Message:            "Vault failed to sign",
 								LastTransitionTime: metaFixedClockStart,
 								LastUpdateTime:     metaFixedClockStart,
 							}),

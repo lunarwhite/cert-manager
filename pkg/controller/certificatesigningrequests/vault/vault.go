@@ -100,7 +100,10 @@ func (v *Vault) Sign(ctx context.Context, csr *certificatesv1.CertificateSigning
 	}
 
 	if err != nil {
-		message := fmt.Sprintf("Failed to initialise vault client for signing: %s", err)
+		message := "Failed to initialise vault client for signing"
+		// err may embed the Vault server's raw response body, attacker-
+		// influenced since spec.vault.server is tenant-controlled; keep it
+		// out of the Event.
 		log.Error(err, message)
 		v.recorder.Event(csr, corev1.EventTypeWarning, "ErrorVaultInit", message)
 		return err
@@ -117,7 +120,8 @@ func (v *Vault) Sign(ctx context.Context, csr *certificatesv1.CertificateSigning
 
 	certPEM, _, err := client.Sign(csr.Spec.Request, duration)
 	if err != nil {
-		message := fmt.Sprintf("Vault failed to sign: %s", err)
+		message := "Vault failed to sign"
+		// Same reasoning as above: keep the raw response out of the Event/condition.
 		log.Error(err, message)
 		v.recorder.Event(csr, corev1.EventTypeWarning, "ErrorSigning", message)
 		util.CertificateSigningRequestSetFailed(csr, "ErrorSigning", message)

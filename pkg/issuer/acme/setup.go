@@ -22,6 +22,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	stderrors "errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -331,12 +332,13 @@ func (a *Acme) setup(ctx context.Context, issuer v1.GenericIssuer) setupResult {
 		// TODO: this error could be from an account registration or an attempt
 		// to retrieve an existing account - perhaps we should log different
 		// messages in those two scenarios.
-		msg := messageAccountRegistrationFailed + err.Error()
 		log.Error(err, "failed to register an ACME account")
 
-		acmeErr, ok := err.(*acmeapi.Error)
+		var acmeErr *acmeapi.Error
+		ok := stderrors.As(err, &acmeErr)
 		// If this is not an ACME error, we will simply return it and retry later
 		if !ok {
+			msg := messageAccountRegistrationFailed + err.Error()
 			return setupResult{
 				err: err,
 
@@ -345,6 +347,13 @@ func (a *Acme) setup(ctx context.Context, issuer v1.GenericIssuer) setupResult {
 				message: msg,
 			}
 		}
+
+		// acmeErr.Detail is attacker-influenced free text from the configured
+		// ACME server; keep it out of the returned error and condition
+		// message, logging the full detail for operators instead (WarnLevel,
+		// for parity with Vault's equivalent log call).
+		log.V(logf.WarnLevel).Info("ACME server returned an error response", "statusCode", acmeErr.StatusCode, "problemType", acmeErr.ProblemType, "detail", acmeErr.Detail)
+		msg := messageAccountRegistrationFailed + fmt.Sprintf("%d %s", acmeErr.StatusCode, acmeErr.ProblemType)
 
 		// If the status code is 400 (BadRequest), we will *not* retry this registration
 		// as it implies that something about the request (i.e. email address or private key)
@@ -363,7 +372,7 @@ func (a *Acme) setup(ctx context.Context, issuer v1.GenericIssuer) setupResult {
 
 		// Otherwise if we receive anything other than a 400, we will retry.
 		return setupResult{
-			err: err,
+			err: fmt.Errorf("%s", msg),
 
 			status:  cmmeta.ConditionFalse,
 			reason:  errorAccountRegistrationFailed,
@@ -376,13 +385,14 @@ func (a *Acme) setup(ctx context.Context, issuer v1.GenericIssuer) setupResult {
 	specEmail := issuer.GetSpec().ACME.Email
 	account, registeredEmail, err := ensureEmailUpToDate(ctx, cl, account, specEmail)
 	if err != nil {
-		msg := messageAccountUpdateFailed + err.Error()
 		log.Error(err, "failed to update ACME account")
-		a.recorder.Event(issuer, corev1.EventTypeWarning, errorAccountUpdateFailed, msg)
 
-		acmeErr, ok := err.(*acmeapi.Error)
+		var acmeErr *acmeapi.Error
+		ok := stderrors.As(err, &acmeErr)
 		// If this is not an ACME error, we will simply return it and retry later
 		if !ok {
+			msg := messageAccountUpdateFailed + err.Error()
+			a.recorder.Event(issuer, corev1.EventTypeWarning, errorAccountUpdateFailed, msg)
 			return setupResult{
 				err: err,
 
@@ -391,6 +401,12 @@ func (a *Acme) setup(ctx context.Context, issuer v1.GenericIssuer) setupResult {
 				message: msg,
 			}
 		}
+
+		// acmeErr.Detail is attacker-influenced; keep it out of the returned
+		// error, condition message, and Event too (see above).
+		log.V(logf.WarnLevel).Info("ACME server returned an error response", "statusCode", acmeErr.StatusCode, "problemType", acmeErr.ProblemType, "detail", acmeErr.Detail)
+		msg := messageAccountUpdateFailed + fmt.Sprintf("%d %s", acmeErr.StatusCode, acmeErr.ProblemType)
+		a.recorder.Event(issuer, corev1.EventTypeWarning, errorAccountUpdateFailed, msg)
 
 		// If the status code is 400 (BadRequest), we will *not* retry this registration
 		// as it implies that something about the request (i.e. email address or private key)
@@ -409,7 +425,7 @@ func (a *Acme) setup(ctx context.Context, issuer v1.GenericIssuer) setupResult {
 
 		// Otherwise if we receive anything other than a 400, we will retry.
 		return setupResult{
-			err: err,
+			err: fmt.Errorf("%s", msg),
 
 			status:  cmmeta.ConditionFalse,
 			reason:  errorAccountUpdateFailed,

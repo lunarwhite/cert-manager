@@ -18,6 +18,7 @@ package vault
 
 import (
 	"context"
+	"errors"
 
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 
@@ -90,7 +91,11 @@ func (v *Vault) Sign(ctx context.Context, cr *v1.CertificateRequest, issuerObj v
 
 	if err != nil {
 		message := "Failed to initialise vault client for signing"
-		v.reporter.Pending(cr, err, "VaultInitError", message)
+		// err may embed the Vault server's raw response body, attacker-
+		// influenced since spec.vault.server is tenant-controlled; keep it
+		// out of the Event/condition (cmerrors.IsInvalidData below still
+		// checks the original err).
+		v.reporter.Pending(cr, errors.New("see controller logs for details"), "VaultInitError", message)
 		log.Error(err, message)
 
 		if cmerrors.IsInvalidData(err) {
@@ -105,7 +110,8 @@ func (v *Vault) Sign(ctx context.Context, cr *v1.CertificateRequest, issuerObj v
 	if err != nil {
 		message := "Vault failed to sign certificate"
 
-		v.reporter.Failed(cr, err, "SigningError", message)
+		// Same reasoning as above: keep the raw response out of the Event/condition.
+		v.reporter.Failed(cr, errors.New("see controller logs for details"), "SigningError", message)
 		log.Error(err, message)
 
 		return nil, nil

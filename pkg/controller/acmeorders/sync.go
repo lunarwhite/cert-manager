@@ -104,7 +104,10 @@ func (c *controller) Sync(ctx context.Context, o *cmacme.Order) (err error) {
 			if acmeErr.StatusCode >= 400 && acmeErr.StatusCode < 500 {
 				log.Error(err, "failed to update Order status due to a 4xx error, marking Order as failed")
 				c.setOrderState(&o.Status, string(cmacme.Errored))
-				o.Status.Reason = fmt.Sprintf("Failed to retrieve Order resource: %v", err)
+				// acmeErr's Detail/Subproblems are attacker-influenced free text
+				// from the configured ACME server; every acmeErr use in this file
+				// strips them the same way, keeping the full error in the log above.
+				o.Status.Reason = fmt.Sprintf("Failed to retrieve Order resource: %d %s", acmeErr.StatusCode, acmeErr.ProblemType)
 				return nil
 			}
 		}
@@ -186,7 +189,7 @@ func (c *controller) Sync(ctx context.Context, o *cmacme.Order) (err error) {
 		if acmeErr.StatusCode >= 400 && acmeErr.StatusCode < 500 {
 			log.Error(err, "failed to retrieve the ACME order (4xx error) marking Order as failed")
 			c.setOrderState(&o.Status, string(cmacme.Errored))
-			o.Status.Reason = fmt.Sprintf("Failed to retrieve Order resource: %v", err)
+			o.Status.Reason = fmt.Sprintf("Failed to retrieve Order resource: %d %s", acmeErr.StatusCode, acmeErr.ProblemType)
 			return nil
 		}
 	}
@@ -210,7 +213,7 @@ func (c *controller) Sync(ctx context.Context, o *cmacme.Order) (err error) {
 			if acmeErr.StatusCode >= 400 && acmeErr.StatusCode < 500 {
 				log.Error(err, "failed to update Order status due to a 4xx error, marking Order as failed")
 				c.setOrderState(&o.Status, string(cmacme.Errored))
-				o.Status.Reason = fmt.Sprintf("Failed to retrieve Order resource: %v", err)
+				o.Status.Reason = fmt.Sprintf("Failed to retrieve Order resource: %d %s", acmeErr.StatusCode, acmeErr.ProblemType)
 				return nil
 			}
 		}
@@ -245,7 +248,7 @@ func (c *controller) Sync(ctx context.Context, o *cmacme.Order) (err error) {
 			if acmeErr.StatusCode >= 400 && acmeErr.StatusCode < 500 {
 				log.Error(err, "failed to update Order status due to a 4xx error, marking Order as failed")
 				c.setOrderState(&o.Status, string(cmacme.Errored))
-				o.Status.Reason = fmt.Sprintf("Failed to retrieve Order resource: %v", err)
+				o.Status.Reason = fmt.Sprintf("Failed to retrieve Order resource: %d %s", acmeErr.StatusCode, acmeErr.ProblemType)
 				return nil
 			}
 		}
@@ -331,7 +334,16 @@ func (c *controller) createOrder(ctx context.Context, cl acmecl.Interface, o *cm
 		if !isRetryableError(err) {
 			log.Error(err, "failed to create Order resource due to bad request, marking Order as failed")
 			c.setOrderState(&o.Status, string(cmacme.Errored))
-			o.Status.Reason = fmt.Sprintf("Failed to create Order: %v", err)
+			var acmeErr *acmeapi.Error
+			if errors.As(err, &acmeErr) {
+				// acmeErr's Detail/Subproblems are attacker-influenced; strip
+				// them as above.
+				o.Status.Reason = fmt.Sprintf("Failed to create Order: %d %s", acmeErr.StatusCode, acmeErr.ProblemType)
+			} else {
+				// Static sentinel errors (e.g. ErrCADoesNotSupportProfiles)
+				// aren't attacker-influenced, so are safe to reflect verbatim.
+				o.Status.Reason = fmt.Sprintf("Failed to create Order: %v", err)
+			}
 			return nil
 		}
 		return fmt.Errorf("error creating new order: %v", err)
@@ -424,7 +436,9 @@ func (c *controller) fetchMetadataForAuthorizations(ctx context.Context, o *cmac
 			if acmeErr.StatusCode >= 400 && acmeErr.StatusCode < 500 {
 				log.Error(err, "failed to fetch authorization metadata from acme server")
 				c.setOrderState(&o.Status, string(cmacme.Errored))
-				o.Status.Reason = fmt.Sprintf("Failed to fetch authorization: %v", err)
+				// acmeErr's Detail/Subproblems are attacker-influenced; strip
+				// them as above.
+				o.Status.Reason = fmt.Sprintf("Failed to fetch authorization: %d %s", acmeErr.StatusCode, acmeErr.ProblemType)
 				return nil
 			}
 		}
@@ -590,7 +604,11 @@ func (c *controller) finalizeOrder(ctx context.Context, cl acmecl.Interface, o *
 		if ok && acmeGetOrderErr.StatusCode >= 400 && acmeGetOrderErr.StatusCode < 500 {
 			log.Error(err, "failed to retrieve the ACME order (4xx error) marking Order as failed")
 			c.setOrderState(&o.Status, string(cmacme.Errored))
-			o.Status.Reason = fmt.Sprintf("Failed to retrieve Order resource: %v", err)
+			// Deliberately reuses the outer acmeErr (from CreateOrderCert,
+			// already confirmed StatusForbidden), not acmeGetOrderErr; its
+			// Detail/Subproblems are attacker-influenced and stripped here
+			// the same way as elsewhere in this file.
+			o.Status.Reason = fmt.Sprintf("Failed to retrieve Order resource: %d %s", acmeErr.StatusCode, acmeErr.ProblemType)
 			return nil
 		}
 		if getOrderErr != nil {
@@ -608,7 +626,7 @@ func (c *controller) finalizeOrder(ctx context.Context, cl acmecl.Interface, o *
 	if ok && acmeErr.StatusCode >= 400 && acmeErr.StatusCode < 500 {
 		log.Error(err, "failed to finalize Order resource due to bad request, marking Order as failed")
 		c.setOrderState(&o.Status, string(cmacme.Errored))
-		o.Status.Reason = fmt.Sprintf("Failed to finalize Order: %v", err)
+		o.Status.Reason = fmt.Sprintf("Failed to finalize Order: %d %s", acmeErr.StatusCode, acmeErr.ProblemType)
 		return nil
 	}
 
@@ -623,7 +641,7 @@ func (c *controller) finalizeOrder(ctx context.Context, cl acmecl.Interface, o *
 		if acmeErr.StatusCode >= 400 && acmeErr.StatusCode < 500 {
 			log.Error(err, "failed to update Order status due to a 4xx error, marking Order as failed")
 			c.setOrderState(&o.Status, string(cmacme.Errored))
-			o.Status.Reason = fmt.Sprintf("Failed to retrieve Order resource: %v", errUpdate)
+			o.Status.Reason = fmt.Sprintf("Failed to retrieve Order resource: %d %s", acmeErr.StatusCode, acmeErr.ProblemType)
 			return nil
 		}
 		if acmeErr.StatusCode >= 500 {
@@ -685,7 +703,9 @@ func (c *controller) syncCertificateData(ctx context.Context, cl acmecl.Interfac
 		if acmeErr.StatusCode >= 400 && acmeErr.StatusCode < 500 {
 			log.Error(err, "failed to update Order status due to a 4xx error, marking Order as failed")
 			c.setOrderState(&o.Status, string(cmacme.Errored))
-			o.Status.Reason = fmt.Sprintf("Failed to retrieve Order resource: %v", err)
+			// acmeErr's Detail/Subproblems are attacker-influenced; strip
+			// them as above.
+			o.Status.Reason = fmt.Sprintf("Failed to retrieve Order resource: %d %s", acmeErr.StatusCode, acmeErr.ProblemType)
 			return nil
 		}
 	}
@@ -712,7 +732,9 @@ func (c *controller) syncCertificateDataWithOrder(ctx context.Context, cl acmecl
 		if acmeErr.StatusCode >= 400 && acmeErr.StatusCode < 500 {
 			log.Error(err, "failed to retrieve issued certificate from ACME server")
 			c.setOrderState(&o.Status, string(cmacme.Errored))
-			o.Status.Reason = fmt.Sprintf("Failed to retrieve signed certificate: %v", err)
+			// acmeErr's Detail/Subproblems are attacker-influenced; strip
+			// them as above.
+			o.Status.Reason = fmt.Sprintf("Failed to retrieve signed certificate: %d %s", acmeErr.StatusCode, acmeErr.ProblemType)
 			return nil
 		}
 	}

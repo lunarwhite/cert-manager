@@ -155,6 +155,13 @@ func (c *controller) Sync(ctx context.Context, chOriginal *cmacme.Challenge) (er
 	if ch.Status.State == "" {
 		err := c.syncChallengeStatus(ctx, cl, ch)
 		if err != nil {
+			// handleError's 4xx branch doesn't log (acceptChallenge, its
+			// other caller, already logs before calling it); log the 4xx
+			// case here so it isn't lost for this call path. Non-4xx
+			// errors are still logged by handleError.
+			if acmeErr, ok := err.(*acmeapi.Error); ok && acmeErr.StatusCode >= 400 && acmeErr.StatusCode < 500 {
+				log.Error(err, "error syncing challenge status", "statusCode", acmeErr.StatusCode, "problemType", acmeErr.ProblemType)
+			}
 			return handleError(ctx, ch, err)
 		}
 
@@ -332,7 +339,12 @@ func handleError(ctx context.Context, ch *cmacme.Challenge, err error) error {
 
 	if acmeErr.StatusCode >= 400 && acmeErr.StatusCode < 500 {
 		ch.Status.State = cmacme.Errored
-		ch.Status.Reason = fmt.Sprintf("Failed to retrieve Order resource: %v", err)
+		// acmeErr's Detail/Subproblems are attacker-influenced free text from
+		// the configured ACME server; keep them out of the tenant-visible
+		// Challenge status, which kubectl get challenges prints directly.
+		// The full error is logged by the caller, closest to where it
+		// originated.
+		ch.Status.Reason = fmt.Sprintf("Failed to retrieve Order resource: %d %s", acmeErr.StatusCode, acmeErr.ProblemType)
 		return nil
 	}
 
@@ -428,8 +440,16 @@ func (c *controller) syncChallengeStatus(ctx context.Context, cl acmecl.Interfac
 	ch.Status.Reason = ""
 	if acmeChallenge.Error != nil {
 		if acmeErr, ok := acmeChallenge.Error.(*acmeapi.Error); ok {
-			ch.Status.Reason = acmeErr.Detail
+			// acmeErr.Detail is attacker-influenced; keep it out of the
+			// Challenge status, logging it here instead.
+			logf.FromContext(ctx).V(logf.WarnLevel).Info("ACME server returned an error response for challenge",
+				"statusCode", acmeErr.StatusCode, "problemType", acmeErr.ProblemType, "detail", acmeErr.Detail)
+			ch.Status.Reason = fmt.Sprintf("%d %s", acmeErr.StatusCode, acmeErr.ProblemType)
 		} else {
+			// acmeChallenge.Error is always *acmeapi.Error in practice
+			// (wireChallenge.challenge, the only populator, guarantees it);
+			// this interface-type fallback isn't known to carry
+			// attacker-influenced content.
 			ch.Status.Reason = acmeChallenge.Error.Error()
 		}
 	}
@@ -458,8 +478,17 @@ func (c *controller) acceptChallenge(ctx context.Context, cl acmecl.Interface, c
 		ch.Status.State = cmacme.State(acmeChal.Status)
 	}
 	if err != nil {
-		log.Error(err, "error accepting challenge")
-		ch.Status.Reason = fmt.Sprintf("Error accepting challenge: %v", err)
+		if acmeErr, ok := err.(*acmeapi.Error); ok {
+			// acmeErr's Detail/Subproblems are attacker-influenced; keep
+			// them out of the Challenge status (full error logged below).
+			log.Error(err, "error accepting challenge", "statusCode", acmeErr.StatusCode, "problemType", acmeErr.ProblemType)
+			ch.Status.Reason = fmt.Sprintf("Error accepting challenge: %d %s", acmeErr.StatusCode, acmeErr.ProblemType)
+		} else {
+			// A non-ACME error here (e.g. a transient network failure) is
+			// a safe, local Go error, not upstream content.
+			log.Error(err, "error accepting challenge")
+			ch.Status.Reason = fmt.Sprintf("Error accepting challenge: %v", err)
+		}
 		return handleError(ctx, ch, err)
 	}
 
@@ -474,7 +503,14 @@ func (c *controller) acceptChallenge(ctx context.Context, cl acmecl.Interface, c
 	defer cancelAuthorization()
 	authorization, err := cl.WaitAuthorization(ctxTimeout, ch.Spec.AuthorizationURL)
 	if err != nil {
-		log.Error(err, "error waiting for authorization")
+		if authErr, ok := err.(*acmeapi.AuthorizationError); ok {
+			// Full error (including nested Detail) logged here for
+			// operators; only sanitizeAuthorizationError's sanitized form
+			// ever reaches the Challenge/Event.
+			log.Error(err, "error waiting for authorization", "uri", authErr.URI, "identifier", authErr.Identifier)
+		} else {
+			log.Error(err, "error waiting for authorization")
+		}
 		return c.handleAuthorizationError(ctxTimeout, ch, err)
 	}
 
@@ -498,12 +534,41 @@ func (c *controller) handleAuthorizationError(ctx context.Context, ch *cmacme.Ch
 	//   should be safe as the client library only returns an AuthorizationError
 	//   if the returned state is 'invalid'
 	ch.Status.State = cmacme.Invalid
-	ch.Status.Reason = fmt.Sprintf("Error accepting authorization: %v", authErr)
-	c.recorder.Eventf(ch, corev1.EventTypeWarning, reasonFailed, "Accepting challenge authorization failed: %v", authErr)
+	// sanitizeAuthorizationError strips attacker-influenced Detail from
+	// each nested error; see its doc comment below. Full error already
+	// logged by the caller.
+	sanitized := sanitizeAuthorizationError(authErr)
+	ch.Status.Reason = fmt.Sprintf("Error accepting authorization: %s", sanitized)
+	c.recorder.Eventf(ch, corev1.EventTypeWarning, reasonFailed, "Accepting challenge authorization failed: %s", sanitized)
 
 	// return nil here, as accepting the challenge did not error, the challenge
 	// simply failed
 	return nil
+}
+
+// sanitizeAuthorizationError renders authErr the same way
+// (*acmeapi.AuthorizationError).Error() does (see
+// third_party/forked/acme/types.go), except each nested *acmeapi.Error is
+// rendered as StatusCode/ProblemType only, omitting attacker-influenced
+// Detail/Subproblems. Nested errors are always *acmeapi.Error in practice --
+// wireAuthz.error() only ever appends wireError.error()'s result to
+// AuthorizationError.Errors -- but any other type is left verbatim, since
+// it's a safe, local Go error, not upstream content.
+func sanitizeAuthorizationError(authErr *acmeapi.AuthorizationError) string {
+	parts := make([]string, len(authErr.Errors))
+	for i, e := range authErr.Errors {
+		if acmeErr, ok := e.(*acmeapi.Error); ok {
+			parts[i] = fmt.Sprintf("%d %s", acmeErr.StatusCode, acmeErr.ProblemType)
+		} else {
+			parts[i] = e.Error()
+		}
+	}
+
+	if authErr.Identifier != "" {
+		return fmt.Sprintf("acme: authorization error for %s: %s", authErr.Identifier, strings.Join(parts, "; "))
+	}
+
+	return fmt.Sprintf("acme: authorization error: %s", strings.Join(parts, "; "))
 }
 
 func (c *controller) solverFor(challengeType cmacme.ACMEChallengeType) (solver, error) {

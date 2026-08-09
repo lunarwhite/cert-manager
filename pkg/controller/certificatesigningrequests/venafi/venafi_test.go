@@ -199,6 +199,11 @@ func TestProcessItem(t *testing.T) {
 				},
 			},
 		},
+		// The error below embeds a sentinel, doubling this case as the
+		// regression test for the fix ensuring ProcessItem never reflects
+		// the raw Certificate Manager client-init error into the recorded
+		// Event -- the exact-string ExpectedEvents match below fails if it
+		// leaks.
 		"an approved CSR where the Certificate Manager client builder returns a generic error should mark as Failed": {
 			csr: gen.CertificateSigningRequestFrom(baseCSR,
 				gen.SetCertificateSigningRequestStatusCondition(certificatesv1.CertificateSigningRequestCondition{
@@ -207,13 +212,13 @@ func TestProcessItem(t *testing.T) {
 				}),
 			),
 			clientBuilder: func(_ string, _ internalinformers.SecretLister, _ cmapi.GenericIssuer, _ *metrics.Metrics, _ logr.Logger, _ string) (venaficlient.Interface, error) {
-				return nil, errors.New("generic error")
+				return nil, errors.New("generic error: SENTINEL-VENAFI-CSR-CLIENTINIT-DETAIL")
 			},
 			expectedErr: true,
 			builder: &testpkg.Builder{
 				CertManagerObjects: []runtime.Object{baseIssuer.DeepCopy()},
 				ExpectedEvents: []string{
-					"Warning ErrorVenafiInit Failed to initialise Certificate Manager client for signing: generic error",
+					"Warning ErrorVenafiInit Failed to initialise Certificate Manager client for signing",
 				},
 				ExpectedActions: []testpkg.Action{
 					testpkg.NewAction(coretesting.NewCreateAction(
@@ -449,6 +454,8 @@ func TestProcessItem(t *testing.T) {
 				},
 			},
 		},
+		// Sentinel embedded as above: doubles as the regression test for
+		// the RequestCertificate-error sanitization.
 		"an approved CSR which does not yet have a pickup ID, but the client responds a generic error, should mark as Failed": {
 			csr: gen.CertificateSigningRequestFrom(baseCSR,
 				gen.AddCertificateSigningRequestAnnotations(map[string]string{
@@ -462,14 +469,14 @@ func TestProcessItem(t *testing.T) {
 			clientBuilder: func(_ string, _ internalinformers.SecretLister, _ cmapi.GenericIssuer, _ *metrics.Metrics, _ logr.Logger, _ string) (venaficlient.Interface, error) {
 				return &fakevenaficlient.Venafi{
 					RequestCertificateFn: func(_ []byte, _ time.Duration, _ []venafiapi.CustomField) (string, error) {
-						return "", errors.New("generic error")
+						return "", errors.New("generic error: SENTINEL-VENAFI-CSR-REQUEST-DETAIL")
 					},
 				}, nil
 			},
 			builder: &testpkg.Builder{
 				CertManagerObjects: []runtime.Object{baseIssuer.DeepCopy()},
 				ExpectedEvents: []string{
-					"Warning ErrorRequest Failed to request Certificate Manager certificate: generic error",
+					"Warning ErrorRequest Failed to request Certificate Manager certificate",
 				},
 				ExpectedActions: []testpkg.Action{
 					testpkg.NewAction(coretesting.NewCreateAction(
@@ -511,7 +518,7 @@ func TestProcessItem(t *testing.T) {
 								Type:               certificatesv1.CertificateFailed,
 								Status:             corev1.ConditionTrue,
 								Reason:             "ErrorRequest",
-								Message:            "Failed to request Certificate Manager certificate: generic error",
+								Message:            "Failed to request Certificate Manager certificate",
 								LastTransitionTime: metaFixedClockStart,
 								LastUpdateTime:     metaFixedClockStart,
 							}),
@@ -683,6 +690,8 @@ func TestProcessItem(t *testing.T) {
 				},
 			},
 		},
+		// Sentinel embedded as above: doubles as the regression test for
+		// the RetrieveCertificate-error sanitization.
 		"an approved CSR which has a pickup ID, retrieve certificate returns a generic error, fire event and return error": {
 			csr: gen.CertificateSigningRequestFrom(baseCSR,
 				gen.AddCertificateSigningRequestAnnotations(map[string]string{
@@ -697,7 +706,7 @@ func TestProcessItem(t *testing.T) {
 			clientBuilder: func(_ string, _ internalinformers.SecretLister, _ cmapi.GenericIssuer, _ *metrics.Metrics, _ logr.Logger, _ string) (venaficlient.Interface, error) {
 				return &fakevenaficlient.Venafi{
 					RetrieveCertificateFn: func(_ string, _ []byte, _ time.Duration, _ []venafiapi.CustomField) ([]byte, error) {
-						return nil, errors.New("generic error")
+						return nil, errors.New("generic error: SENTINEL-VENAFI-CSR-RETRIEVE-DETAIL")
 					},
 				}, nil
 			},
@@ -705,7 +714,7 @@ func TestProcessItem(t *testing.T) {
 			builder: &testpkg.Builder{
 				CertManagerObjects: []runtime.Object{baseIssuer.DeepCopy()},
 				ExpectedEvents: []string{
-					"Warning ErrorRetrieve Failed to obtain Certificate Manager certificate: generic error",
+					"Warning ErrorRetrieve Failed to obtain Certificate Manager certificate",
 				},
 				ExpectedActions: []testpkg.Action{
 					testpkg.NewAction(coretesting.NewCreateAction(

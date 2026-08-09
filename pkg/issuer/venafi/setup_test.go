@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -72,13 +73,17 @@ func TestSetup(t *testing.T) {
 		}, nil
 	}
 
+	// The sentinel strings embedded below stand in for attacker-influenced
+	// content an upstream Venafi server/SDK error could contain; the test
+	// asserts they are never reflected into the returned error or
+	// condition message.
 	failingVerifyCredentialsClient := func(string, internalinformers.SecretLister, cmapi.GenericIssuer, *metrics.Metrics, logr.Logger, string) (client.Interface, error) {
 		return &internalvenafifake.Venafi{
 			PingFn: func() error {
 				return nil
 			},
 			VerifyCredentialsFn: func() error {
-				return fmt.Errorf("401 Unauthorized")
+				return fmt.Errorf("401 Unauthorized: SENTINEL-VENAFI-GENERIC")
 			},
 		}, nil
 	}
@@ -89,7 +94,7 @@ func TestSetup(t *testing.T) {
 				return nil
 			},
 			VerifyCredentialsFn: func() error {
-				return client.AuthFailedError{Err: fmt.Errorf("401 Unauthorized — invalid client credentials")}
+				return client.AuthFailedError{Err: fmt.Errorf("401 Unauthorized — invalid client credentials: SENTINEL-VENAFI-AUTHFAILED")}
 			},
 		}, nil
 	}
@@ -101,7 +106,7 @@ func TestSetup(t *testing.T) {
 			iss:           baseIssuer.DeepCopy(),
 			expectedCondition: &cmapi.IssuerCondition{
 				Reason:  "ErrorSetup",
-				Message: "Failed to setup Certificate Manager issuer: error building client: this is an error",
+				Message: "Failed to setup Certificate Manager issuer",
 				Status:  "False",
 			},
 		},
@@ -112,7 +117,7 @@ func TestSetup(t *testing.T) {
 			expectedErr:   true,
 			expectedCondition: &cmapi.IssuerCondition{
 				Reason:  "ErrorSetup",
-				Message: "Failed to setup Certificate Manager issuer: error pinging Certificate Manager: this is a ping error",
+				Message: "Failed to setup Certificate Manager issuer",
 				Status:  "False",
 			},
 		},
@@ -145,23 +150,25 @@ func TestSetup(t *testing.T) {
 		},
 
 		"if verifyCredentials returns an error we should set condition to False": {
-			clientBuilder: failingVerifyCredentialsClient,
-			iss:           baseIssuer.DeepCopy(),
-			expectedErr:   true,
+			clientBuilder:         failingVerifyCredentialsClient,
+			iss:                   baseIssuer.DeepCopy(),
+			expectedErr:           true,
+			forbiddenErrSubstring: "SENTINEL-VENAFI-GENERIC",
 			expectedCondition: &cmapi.IssuerCondition{
 				Reason:  "ErrorSetup",
-				Message: "Failed to setup Certificate Manager issuer: client.VerifyCredentials: 401 Unauthorized",
+				Message: "Failed to setup Certificate Manager issuer",
 				Status:  "False",
 			},
 		},
 
 		"if verifyCredentials returns AuthFailedError we should set condition to False with AuthFailed": {
-			clientBuilder: authFailedVerifyCredentialsClient,
-			iss:           baseIssuer.DeepCopy(),
-			expectedErr:   true,
+			clientBuilder:         authFailedVerifyCredentialsClient,
+			iss:                   baseIssuer.DeepCopy(),
+			expectedErr:           true,
+			forbiddenErrSubstring: "SENTINEL-VENAFI-AUTHFAILED",
 			expectedCondition: &cmapi.IssuerCondition{
 				Reason:  "AuthFailed",
-				Message: "OAuth token request failed: 401 Unauthorized — invalid client credentials",
+				Message: "OAuth token request failed",
 				Status:  "False",
 			},
 		},
@@ -181,6 +188,11 @@ type testSetupT struct {
 	expectedErr       bool
 	expectedEvents    []string
 	expectedCondition *cmapi.IssuerCondition
+
+	// forbiddenErrSubstring, if set, must not appear (case-insensitively) in
+	// either the returned error or the resulting condition message. Used to
+	// regression-test that upstream error content is never reflected.
+	forbiddenErrSubstring string
 }
 
 func (s *testSetupT) runTest(t *testing.T) {
@@ -200,6 +212,9 @@ func (s *testSetupT) runTest(t *testing.T) {
 	}
 	if err == nil && s.expectedErr {
 		t.Errorf("expected to get an error but did not get one")
+	}
+	if s.forbiddenErrSubstring != "" && err != nil && strings.Contains(strings.ToLower(err.Error()), strings.ToLower(s.forbiddenErrSubstring)) {
+		t.Errorf("expected returned error not to contain %q, but it did: %v", s.forbiddenErrSubstring, err)
 	}
 
 	if !slices.Equal(s.expectedEvents, rec.Events) {
@@ -233,6 +248,9 @@ func (s *testSetupT) runTest(t *testing.T) {
 		if s.expectedCondition.Status != c.Status {
 			t.Errorf("unexpected condition status, exp=%s got=%s",
 				s.expectedCondition.Status, c.Status)
+		}
+		if s.forbiddenErrSubstring != "" && strings.Contains(strings.ToLower(c.Message), strings.ToLower(s.forbiddenErrSubstring)) {
+			t.Errorf("expected condition message not to contain %q, but it did: %s", s.forbiddenErrSubstring, c.Message)
 		}
 	}
 }

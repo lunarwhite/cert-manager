@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -385,7 +386,7 @@ func TestVault_Setup(t *testing.T) {
 					},
 				},
 			},
-			expectErr: "Get \"https:///vault.example.com/v1/sys/health\": http: no Host in request URL",
+			expectErr: messageVaultInitializedAndUnsealedFailed,
 		},
 		{
 			name: "server with leading whitespace should fail to parse",
@@ -403,7 +404,7 @@ func TestVault_Setup(t *testing.T) {
 					},
 				},
 			},
-			expectErr: "error initializing Vault client: parse \" https://vault.example.com\": first path segment in URL cannot contain colon",
+			expectErr: messageVaultClientInitFailed,
 		},
 		{
 			name: "valid auth.clientCertificate: All fields can be omitted",
@@ -488,5 +489,92 @@ func TestVault_Setup(t *testing.T) {
 				require.Len(t, givenIssuer.Status.Conditions, 0)
 			}
 		})
+	}
+}
+
+// errorLeaksBody reports whether err's message contains body.
+func errorLeaksBody(err error, body string) bool {
+	return strings.Contains(strings.ToLower(err.Error()), strings.ToLower(body))
+}
+
+// TestVault_Setup_DoesNotReflectResponseBody ensures that when the Vault
+// server returns a non-2xx response with an attacker-influenced body (e.g.
+// because spec.vault.server points at an attacker-controlled endpoint), the
+// contents of that body are not reflected in the returned error nor the
+// Issuer's Ready condition message.
+func TestVault_Setup_DoesNotReflectResponseBody(t *testing.T) {
+	const sentinel = "SENTINEL-VAULT-BODY"
+
+	// Mock Vault server that fails the AppRole login with a body containing
+	// a sentinel string, simulating an attacker-controlled "Vault" endpoint.
+	vaultServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"errors":["%s"]}`, sentinel)
+	}))
+	defer vaultServer.Close()
+
+	givenIssuer := &v1.Issuer{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-issuer",
+			Namespace: "test-namespace",
+		},
+		Spec: v1.IssuerSpec{
+			IssuerConfig: v1.IssuerConfig{
+				Vault: &v1.VaultIssuer{
+					Path:   "pki_int",
+					Server: vaultServer.URL,
+					Auth: v1.VaultAuth{
+						AppRole: &v1.VaultAppRole{
+							RoleId: "cert-manager",
+							SecretRef: cmmeta.SecretKeySelector{
+								LocalObjectReference: cmmeta.LocalObjectReference{
+									Name: "cert-manager",
+								},
+								Key: "token",
+							},
+							Path: "approle",
+						},
+					},
+				},
+			},
+		},
+	}
+	cmclient := cmfake.NewClientset(givenIssuer)
+
+	v := &Vault{
+		Context: &controller.Context{CMClient: cmclient},
+		createTokenFn: func(ns string) vaultinternal.CreateToken {
+			return func(ctx context.Context, saName string, req *authv1.TokenRequest, opts metav1.CreateOptions) (*authv1.TokenRequest, error) {
+				return &authv1.TokenRequest{Status: authv1.TokenRequestStatus{
+					Token: "token",
+				}}, nil
+			}
+		},
+		secretsLister: &testlisters.FakeSecretLister{
+			SecretsFn: func(namespace string) corelisters.SecretNamespaceLister {
+				return &testlisters.FakeSecretNamespaceLister{
+					GetFn: func(name string) (ret *corev1.Secret, err error) {
+						return &corev1.Secret{
+							ObjectMeta: metav1.ObjectMeta{Name: "cert-manager", Namespace: "test-namespace"},
+							Data:       map[string][]byte{"token": []byte("root")},
+						}, nil
+					},
+				}
+			},
+		},
+	}
+
+	err := v.Setup(t.Context(), givenIssuer)
+	if err == nil {
+		t.Fatal("expected Setup to return an error for a failing Vault login, but got none")
+	}
+	if errorLeaksBody(err, sentinel) {
+		t.Errorf("expected returned error not to contain the response body %q, but it did: %v", sentinel, err)
+	}
+
+	require.Len(t, givenIssuer.Status.Conditions, 1)
+	message := givenIssuer.Status.Conditions[0].Message
+	if strings.Contains(strings.ToLower(message), strings.ToLower(sentinel)) {
+		t.Errorf("expected condition message not to contain the response body %q, but it did: %s", sentinel, message)
 	}
 }

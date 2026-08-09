@@ -331,6 +331,50 @@ func TestSyncHappyPath(t *testing.T) {
 				},
 			},
 		},
+		// Regression test: acmeChallenge.Error.Detail (attacker-influenced)
+		// must not reach Challenge.Status.Reason -- a `kubectl get
+		// challenges` print column -- only StatusCode/ProblemType should.
+		"does not reflect ACME server's per-challenge error Detail into Reason": {
+			challenge: gen.ChallengeFrom(baseChallenge,
+				gen.SetChallengeProcessing(true),
+				gen.SetChallengeURL("testurl"),
+			),
+			builder: &testpkg.Builder{
+				CertManagerObjects: []runtime.Object{gen.ChallengeFrom(baseChallenge,
+					gen.SetChallengeProcessing(true),
+					gen.SetChallengeURL("testurl"),
+				), testIssuerHTTP01Enabled},
+				ExpectedActions: []testpkg.Action{
+					testpkg.NewAction(
+						coretesting.NewUpdateSubresourceAction(cmacme.SchemeGroupVersion.WithResource("challenges"),
+							"status",
+							gen.DefaultTestNamespace,
+							gen.ChallengeFrom(baseChallenge,
+								gen.SetChallengeProcessing(true),
+								gen.SetChallengeURL("testurl"),
+								gen.SetChallengeState(cmacme.Invalid),
+								gen.SetChallengeReason("400 urn:ietf:params:acme:error:dns"),
+							))),
+				},
+			},
+			acmeClient: &acmecl.FakeACME{
+				FakeGetAuthorization: func(ctx context.Context, url string) (*acmeapi.Authorization, error) {
+					return &acmeapi.Authorization{
+						Challenges: []*acmeapi.Challenge{
+							{
+								URI:    "testurl",
+								Status: acmeapi.StatusInvalid,
+								Error: &acmeapi.Error{
+									StatusCode:  400,
+									ProblemType: "urn:ietf:params:acme:error:dns",
+									Detail:      "SENTINEL-SYNCSTATUS-DETAIL",
+								},
+							},
+						},
+					}, nil
+				},
+			},
+		},
 		"call Present and update challenge status to presented": {
 			challenge: gen.ChallengeFrom(baseChallenge,
 				gen.SetChallengeProcessing(true),
@@ -588,7 +632,10 @@ func TestSyncHappyPath(t *testing.T) {
 				},
 			},
 		},
-		"correctly persist ACME authorization error details as Challenge failure reason": {
+		// Regression test: acmeErr.Detail is attacker-influenced free text
+		// from the configured ACME server and must not reach the
+		// Challenge's status/Event, only StatusCode/ProblemType.
+		"does not persist ACME authorization error Detail into Challenge failure reason": {
 			challenge: gen.ChallengeFrom(baseChallenge,
 				gen.SetChallengeProcessing(true),
 				gen.SetChallengeURL("testurl"),
@@ -622,11 +669,11 @@ func TestSyncHappyPath(t *testing.T) {
 							gen.SetChallengeState(cmacme.Invalid),
 							gen.SetChallengeType(cmacme.ACMEChallengeTypeHTTP01),
 							gen.SetChallengePresented(true),
-							gen.SetChallengeReason("Error accepting authorization: acme: authorization error for example.com: 400 fakeerror: this is a very detailed error"),
+							gen.SetChallengeReason("Error accepting authorization: acme: authorization error for example.com: 400 fakeerror"),
 						))),
 				},
 				ExpectedEvents: []string{
-					"Warning Failed Accepting challenge authorization failed: acme: authorization error for example.com: 400 fakeerror: this is a very detailed error",
+					"Warning Failed Accepting challenge authorization failed: acme: authorization error for example.com: 400 fakeerror",
 				},
 			},
 			acmeClient: &acmecl.FakeACME{
@@ -644,7 +691,7 @@ func TestSyncHappyPath(t *testing.T) {
 							&acmeapi.Error{
 								StatusCode:  400,
 								ProblemType: "fakeerror",
-								Detail:      "this is a very detailed error",
+								Detail:      "SENTINEL-AUTHZ-ERROR-DETAIL",
 							},
 						},
 					}
@@ -794,6 +841,56 @@ func TestSyncHappyPath(t *testing.T) {
 							gen.SetChallengePresented(false),
 							gen.SetChallengePresentedAt(oldPresentedAt),
 						))),
+				},
+			},
+		},
+		// Regression test: acceptChallenge sets Challenge.Status.Reason from
+		// the Accept() error before calling handleError, which leaves 5xx
+		// errors untouched -- so an unsanitized Detail set here would
+		// otherwise survive all the way to the tenant-visible status.
+		"does not reflect ACME server's Accept() error Detail into Reason on a 5xx error": {
+			challenge: gen.ChallengeFrom(baseChallenge,
+				gen.SetChallengeProcessing(true),
+				gen.SetChallengeURL("testurl"),
+				gen.SetChallengeState(cmacme.Pending),
+				gen.SetChallengeType(cmacme.ACMEChallengeTypeHTTP01),
+				gen.SetChallengePresented(true),
+			),
+			httpSolver: &fakeSolver{
+				fakeCheck: func(ctx context.Context, issuer v1.GenericIssuer, ch *cmacme.Challenge) error {
+					return nil
+				},
+			},
+			builder: &testpkg.Builder{
+				CertManagerObjects: []runtime.Object{gen.ChallengeFrom(baseChallenge,
+					gen.SetChallengeProcessing(true),
+					gen.SetChallengeURL("testurl"),
+					gen.SetChallengeState(cmacme.Pending),
+					gen.SetChallengeType(cmacme.ACMEChallengeTypeHTTP01),
+					gen.SetChallengePresented(true),
+				), testIssuerHTTP01Enabled},
+				ExpectedActions: []testpkg.Action{
+					testpkg.NewAction(coretesting.NewUpdateSubresourceAction(cmacme.SchemeGroupVersion.WithResource("challenges"),
+						"status",
+						gen.DefaultTestNamespace,
+						gen.ChallengeFrom(baseChallenge,
+							gen.SetChallengeProcessing(true),
+							gen.SetChallengeURL("testurl"),
+							gen.SetChallengeState(cmacme.Pending),
+							gen.SetChallengeType(cmacme.ACMEChallengeTypeHTTP01),
+							gen.SetChallengePresented(true),
+							gen.SetChallengeReason("Error accepting challenge: 500 urn:ietf:params:acme:error:serverInternal"),
+						))),
+				},
+			},
+			expectErr: true,
+			acmeClient: &acmecl.FakeACME{
+				FakeAccept: func(context.Context, *acmeapi.Challenge) (*acmeapi.Challenge, error) {
+					return nil, &acmeapi.Error{
+						StatusCode:  500,
+						ProblemType: "urn:ietf:params:acme:error:serverInternal",
+						Detail:      "SENTINEL-ACCEPTCHALLENGE-DETAIL",
+					}
 				},
 			},
 		},
@@ -1046,7 +1143,7 @@ func Test_HandleError(t *testing.T) {
 			name:        "ACME 4xx response marks the challenge Errored",
 			err:         &acmeapi.Error{StatusCode: 404},
 			wantState:   cmacme.Errored,
-			wantReason:  "Failed to retrieve Order resource: 404 : ",
+			wantReason:  "Failed to retrieve Order resource: 404 ",
 			wantErrBack: false,
 		},
 		{
@@ -1055,6 +1152,19 @@ func Test_HandleError(t *testing.T) {
 			wantState:   "",
 			wantReason:  "",
 			wantErrBack: true,
+		},
+		{
+			// Regression test: acmeErr.Detail is attacker-influenced and
+			// must never reach the tenant-visible Challenge status.
+			name: "ACME 4xx response does not reflect the server's Detail into Reason",
+			err: &acmeapi.Error{
+				StatusCode:  400,
+				ProblemType: "urn:ietf:params:acme:error:dns",
+				Detail:      "SENTINEL-HANDLEERROR-DETAIL",
+			},
+			wantState:   cmacme.Errored,
+			wantReason:  "Failed to retrieve Order resource: 400 urn:ietf:params:acme:error:dns",
+			wantErrBack: false,
 		},
 	}
 

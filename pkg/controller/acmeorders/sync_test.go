@@ -148,7 +148,10 @@ func TestSync(t *testing.T) {
 		FailureTime: &nowMetaTime,
 		URL:         "http://testurl.com/abcde",
 		FinalizeURL: "http://testurl.com/abcde/finalize",
-		Reason:      "Failed to finalize Order: 429 : some error",
+		// The upstream ACME server's Detail ("some error" on acmeError429
+		// below) is attacker-influenced free text and must not appear here;
+		// only the non-sensitive StatusCode/ProblemType are reflected.
+		Reason: "Failed to finalize Order: 429 urn:ietf:params:acme:error:rateLimited",
 		Authorizations: []cmacme.ACMEAuthorization{
 			{
 				URL:          "http://authzurl",
@@ -166,8 +169,9 @@ func TestSync(t *testing.T) {
 	}
 
 	acmeError429 := acmeapi.Error{
-		StatusCode: 429,
-		Detail:     "some error",
+		StatusCode:  429,
+		ProblemType: "urn:ietf:params:acme:error:rateLimited",
+		Detail:      "some error",
 	}
 	acmeError403 := acmeapi.Error{
 		StatusCode: 403,
@@ -1287,4 +1291,177 @@ func (l *fakeLogSink) String() string {
 		out[i] = "\t-" + l.messages[i]
 	}
 	return strings.Join(out, "\n")
+}
+
+// errorLeaksBody reports whether err's message contains body.
+func errorLeaksBody(err error, body string) bool {
+	return strings.Contains(strings.ToLower(err.Error()), strings.ToLower(body))
+}
+
+// assertOrderReasonDoesNotLeakSentinel is a regression-test helper ensuring
+// that an *acmeapi.Error's Detail/Subproblems -- attacker-influenced free
+// text taken directly from the configured ACME server's response -- is
+// never reflected into Order.Status.Reason, while confirming the
+// non-sensitive StatusCode/ProblemType are still present so the fix isn't
+// simply discarding all diagnostic information.
+func assertOrderReasonDoesNotLeakSentinel(t *testing.T, reason string, sentinel string, acmeErr *acmeapi.Error) {
+	t.Helper()
+	if errorLeaksBody(errors.New(reason), sentinel) {
+		t.Errorf("expected Order status reason not to contain the ACME error Detail %q, but it did: %s", sentinel, reason)
+	}
+	if !strings.Contains(reason, fmt.Sprintf("%d", acmeErr.StatusCode)) {
+		t.Errorf("expected Order status reason to retain the non-sensitive StatusCode %d, but got: %s", acmeErr.StatusCode, reason)
+	}
+	if !strings.Contains(reason, acmeErr.ProblemType) {
+		t.Errorf("expected Order status reason to retain the non-sensitive ProblemType %q, but got: %s", acmeErr.ProblemType, reason)
+	}
+}
+
+// TestSyncCertificateData_DoesNotReflectACMEErrorDetail is a regression test
+// ensuring that syncCertificateData's handling of a 4xx error from
+// getACMEOrder (reached via updateOrderStatus) does not reflect the ACME
+// server's Detail into Order.Status.Reason.
+func TestSyncCertificateData_DoesNotReflectACMEErrorDetail(t *testing.T) {
+	const sentinel = "SENTINEL-ACME-ORDER-DETAIL"
+	sentinelErr := &acmeapi.Error{
+		StatusCode:  400,
+		ProblemType: "urn:ietf:params:acme:error:malformed",
+		Detail:      sentinel,
+	}
+
+	cw := &controllerWrapper{controller: &controller{clock: fakeclock.NewFakeClock(time.Now())}}
+	o := &cmacme.Order{
+		Status: cmacme.OrderStatus{
+			URL: "http://testurl.com/abcde",
+		},
+	}
+	cl := &acmecl.FakeACME{
+		FakeGetOrder: func(ctx context.Context, url string) (*acmeapi.Order, error) {
+			return nil, sentinelErr
+		},
+	}
+
+	if err := cw.syncCertificateData(t.Context(), cl, o, &v1.Issuer{}); err != nil {
+		t.Fatalf("expected syncCertificateData to absorb the 4xx ACME error and return nil, but got: %v", err)
+	}
+
+	assertOrderReasonDoesNotLeakSentinel(t, o.Status.Reason, sentinel, sentinelErr)
+}
+
+// TestFinalizeOrder_DoesNotReflectACMEErrorDetail is a regression test
+// ensuring that finalizeOrder's handling of a 4xx error from
+// CreateOrderCert does not reflect the ACME server's Detail into
+// Order.Status.Reason.
+func TestFinalizeOrder_DoesNotReflectACMEErrorDetail(t *testing.T) {
+	const sentinel = "SENTINEL-ACME-FINALIZE-DETAIL"
+	sentinelErr := &acmeapi.Error{
+		StatusCode:  400,
+		ProblemType: "urn:ietf:params:acme:error:malformed",
+		Detail:      sentinel,
+	}
+
+	cw := &controllerWrapper{controller: &controller{clock: fakeclock.NewFakeClock(time.Now())}}
+	o := &cmacme.Order{
+		Spec: cmacme.OrderSpec{
+			DNSNames: []string{"example.com"},
+		},
+	}
+	cl := &acmecl.FakeACME{
+		FakeCreateOrderCert: func(ctx context.Context, finalizeURL string, csr []byte, bundle bool) ([][]byte, string, error) {
+			return nil, "", sentinelErr
+		},
+	}
+
+	if err := cw.finalizeOrder(t.Context(), cl, o, &v1.Issuer{}); err != nil {
+		t.Fatalf("expected finalizeOrder to absorb the 4xx ACME error and return nil, but got: %v", err)
+	}
+
+	assertOrderReasonDoesNotLeakSentinel(t, o.Status.Reason, sentinel, sentinelErr)
+}
+
+// TestCreateOrder_DoesNotReflectACMEErrorDetail is a regression test
+// ensuring that createOrder's errors.As(err, &acmeErr) branch (reached when
+// AuthorizeOrder fails with a genuine, non-retryable *acmeapi.Error) does
+// not reflect the ACME server's Detail into Order.Status.Reason.
+func TestCreateOrder_DoesNotReflectACMEErrorDetail(t *testing.T) {
+	const sentinel = "SENTINEL-ACME-CREATE-DETAIL"
+	sentinelErr := &acmeapi.Error{
+		StatusCode:  400,
+		ProblemType: "urn:ietf:params:acme:error:malformed",
+		Detail:      sentinel,
+	}
+
+	cw := &controllerWrapper{controller: &controller{clock: fakeclock.NewFakeClock(time.Now())}}
+	o := &cmacme.Order{
+		Spec: cmacme.OrderSpec{
+			DNSNames: []string{"example.com"},
+		},
+	}
+	cl := &acmecl.FakeACME{
+		FakeAuthorizeOrder: func(ctx context.Context, id []acmeapi.AuthzID, opt ...acmeapi.OrderOption) (*acmeapi.Order, error) {
+			return nil, sentinelErr
+		},
+	}
+
+	if err := cw.createOrder(t.Context(), cl, o); err != nil {
+		t.Fatalf("expected createOrder to absorb the 4xx ACME error and return nil, but got: %v", err)
+	}
+
+	assertOrderReasonDoesNotLeakSentinel(t, o.Status.Reason, sentinel, sentinelErr)
+}
+
+// TestFinalizeOrder_PreservesOuterACMEErrorOnFailingRetry is a regression
+// test for finalizeOrder's 403 branch, which deliberately reuses the OUTER
+// acmeErr (from the CreateOrderCert call) rather than the inner
+// acmeGetOrderErr (from the nested getACMEOrder retry) when both are 4xx
+// errors. This is the highest-risk site in this area of the code: a
+// plausible-looking but wrong future refactor could swap in the inner error
+// instead, which this test would catch by asserting the reason reflects the
+// outer error's StatusCode/ProblemType and not the inner one's.
+func TestFinalizeOrder_PreservesOuterACMEErrorOnFailingRetry(t *testing.T) {
+	const outerSentinel = "SENTINEL-ACME-FINALIZE-OUTER-DETAIL"
+	const innerSentinel = "SENTINEL-ACME-FINALIZE-INNER-DETAIL"
+	outerErr := &acmeapi.Error{
+		StatusCode:  403,
+		ProblemType: "urn:ietf:params:acme:error:orderNotReady",
+		Detail:      outerSentinel,
+	}
+	innerErr := &acmeapi.Error{
+		StatusCode:  400,
+		ProblemType: "urn:ietf:params:acme:error:malformed",
+		Detail:      innerSentinel,
+	}
+
+	cw := &controllerWrapper{controller: &controller{clock: fakeclock.NewFakeClock(time.Now())}}
+	o := &cmacme.Order{
+		Spec: cmacme.OrderSpec{
+			DNSNames: []string{"example.com"},
+		},
+		Status: cmacme.OrderStatus{
+			// Must be non-empty for the nested getACMEOrder call (triggered
+			// by the outer 403) to actually invoke FakeGetOrder rather than
+			// short-circuiting on "order URL not set".
+			URL: "http://testurl.com/abcde",
+		},
+	}
+	cl := &acmecl.FakeACME{
+		FakeCreateOrderCert: func(ctx context.Context, finalizeURL string, csr []byte, bundle bool) ([][]byte, string, error) {
+			return nil, "", outerErr
+		},
+		FakeGetOrder: func(ctx context.Context, url string) (*acmeapi.Order, error) {
+			return nil, innerErr
+		},
+	}
+
+	if err := cw.finalizeOrder(t.Context(), cl, o, &v1.Issuer{}); err != nil {
+		t.Fatalf("expected finalizeOrder to absorb the errors and return nil, but got: %v", err)
+	}
+
+	assertOrderReasonDoesNotLeakSentinel(t, o.Status.Reason, outerSentinel, outerErr)
+	if errorLeaksBody(errors.New(o.Status.Reason), innerSentinel) {
+		t.Errorf("expected Order status reason not to contain the inner ACME error's Detail %q, but it did: %s", innerSentinel, o.Status.Reason)
+	}
+	if strings.Contains(o.Status.Reason, fmt.Sprintf("%d", innerErr.StatusCode)) {
+		t.Errorf("expected Order status reason to reflect the OUTER error's StatusCode (%d), not the inner error's StatusCode (%d), but got: %s", outerErr.StatusCode, innerErr.StatusCode, o.Status.Reason)
+	}
 }

@@ -21,6 +21,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,6 +41,7 @@ import (
 	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
 	controllerpkg "github.com/cert-manager/cert-manager/pkg/controller"
 	"github.com/cert-manager/cert-manager/pkg/controller/certificaterequests"
+	crutil "github.com/cert-manager/cert-manager/pkg/controller/certificaterequests/util"
 	controllertest "github.com/cert-manager/cert-manager/pkg/controller/test"
 	"github.com/cert-manager/cert-manager/pkg/issuer/venafi/client"
 	"github.com/cert-manager/cert-manager/pkg/issuer/venafi/client/api"
@@ -201,11 +203,16 @@ func TestSign(t *testing.T) {
 		}),
 	)
 
+	// The sentinel embedded below doubles this fixture as the regression
+	// test for the fix ensuring Sign never reflects a raw client-init
+	// error into the Ready condition message or Event -- the exact-string
+	// ExpectedEvents/ExpectedActions match in the "...secret lister
+	// transient error..." cases below fails if it leaks.
 	failGetSecretLister := &testlisters.FakeSecretLister{
 		SecretsFn: func(namespace string) corelisters.SecretNamespaceLister {
 			return &testlisters.FakeSecretNamespaceLister{
 				GetFn: func(name string) (ret *corev1.Secret, err error) {
-					return nil, errors.New("this is a network error")
+					return nil, errors.New("this is a network error: SENTINEL-VENAFI-CR-CLIENTINIT")
 				},
 			}
 		},
@@ -221,6 +228,9 @@ func TestSign(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Status here is raw, unvalidated Venafi-endpoint content in production;
+	// sentinel embedded as above, for the "...sign returns pending
+	// error..." cases below.
 	clientReturnsPending := &internalvenafifake.Venafi{
 		RequestCertificateFn: func(csrPEM []byte, duration time.Duration, customFields []api.CustomField) (string, error) {
 			return "test", nil
@@ -228,13 +238,15 @@ func TestSign(t *testing.T) {
 		RetrieveCertificateFn: func(string, []byte, time.Duration, []api.CustomField) ([]byte, error) {
 			return nil, endpoint.ErrCertificatePending{
 				CertificateID: "test-cert-id",
-				Status:        "test-status-pending",
+				Status:        "test-status-pending: SENTINEL-VENAFI-CR-PENDING",
 			}
 		},
 	}
+	// Sentinel embedded as above, for the "...sign returns generic
+	// error..." cases below.
 	clientReturnsGenericError := &internalvenafifake.Venafi{
 		RequestCertificateFn: func(csrPEM []byte, duration time.Duration, customFields []api.CustomField) (string, error) {
-			return "", errors.New("this is an error")
+			return "", errors.New("this is an error: SENTINEL-VENAFI-CR-REQUEST")
 		},
 	}
 	clientReturnsCert := &internalvenafifake.Venafi{
@@ -332,7 +344,7 @@ func TestSign(t *testing.T) {
 			builder: &controllertest.Builder{
 				CertManagerObjects: []runtime.Object{tppCR.DeepCopy(), tppIssuer.DeepCopy()},
 				ExpectedEvents: []string{
-					`Normal VenafiInitError Failed to initialise Certificate Manager client for signing: this is a network error`,
+					`Normal VenafiInitError Failed to initialise Certificate Manager client for signing: see controller logs for details`,
 				},
 				ExpectedActions: []controllertest.Action{
 					controllertest.NewAction(coretesting.NewUpdateSubresourceAction(
@@ -344,7 +356,7 @@ func TestSign(t *testing.T) {
 								Type:               cmapi.CertificateRequestConditionReady,
 								Status:             cmmeta.ConditionFalse,
 								Reason:             cmapi.CertificateRequestReasonPending,
-								Message:            "Failed to initialise Certificate Manager client for signing: this is a network error",
+								Message:            "Failed to initialise Certificate Manager client for signing: see controller logs for details",
 								LastTransitionTime: &metaFixedClockStart,
 							}),
 						),
@@ -384,7 +396,7 @@ func TestSign(t *testing.T) {
 			builder: &controllertest.Builder{
 				CertManagerObjects: []runtime.Object{cloudCR.DeepCopy(), cloudIssuer.DeepCopy()},
 				ExpectedEvents: []string{
-					`Normal VenafiInitError Failed to initialise Certificate Manager client for signing: this is a network error`,
+					`Normal VenafiInitError Failed to initialise Certificate Manager client for signing: see controller logs for details`,
 				},
 				ExpectedActions: []controllertest.Action{
 					controllertest.NewAction(coretesting.NewUpdateSubresourceAction(
@@ -396,7 +408,7 @@ func TestSign(t *testing.T) {
 								Type:               cmapi.CertificateRequestConditionReady,
 								Status:             cmmeta.ConditionFalse,
 								Reason:             cmapi.CertificateRequestReasonPending,
-								Message:            "Failed to initialise Certificate Manager client for signing: this is a network error",
+								Message:            "Failed to initialise Certificate Manager client for signing: see controller logs for details",
 								LastTransitionTime: &metaFixedClockStart,
 							}),
 						),
@@ -442,7 +454,7 @@ func TestSign(t *testing.T) {
 				CertManagerObjects: []runtime.Object{cloudCR.DeepCopy(), tppIssuer.DeepCopy()},
 				ExpectedEvents: []string{
 					"Normal IssuancePending certificate is requested",
-					"Normal IssuancePending certificate still in a pending state, the request will be retried: Issuance is pending. You may try retrieving the certificate later using Pickup ID: test-cert-id\n\tStatus: test-status-pending",
+					"Normal IssuancePending certificate still in a pending state, the request will be retried: see controller logs for details",
 				},
 				ExpectedActions: []controllertest.Action{
 					controllertest.NewAction(coretesting.NewUpdateSubresourceAction(
@@ -469,7 +481,7 @@ func TestSign(t *testing.T) {
 								Type:               cmapi.CertificateRequestConditionReady,
 								Status:             cmmeta.ConditionFalse,
 								Reason:             cmapi.CertificateRequestReasonPending,
-								Message:            "certificate still in a pending state, the request will be retried: Issuance is pending. You may try retrieving the certificate later using Pickup ID: test-cert-id\n\tStatus: test-status-pending",
+								Message:            "certificate still in a pending state, the request will be retried: see controller logs for details",
 								LastTransitionTime: &metaFixedClockStart,
 							}),
 							gen.AddCertificateRequestAnnotations(map[string]string{cmapi.VenafiPickupIDAnnotationKey: "test"}),
@@ -488,7 +500,7 @@ func TestSign(t *testing.T) {
 				CertManagerObjects: []runtime.Object{cloudCR.DeepCopy(), cloudIssuer.DeepCopy()},
 				ExpectedEvents: []string{
 					"Normal IssuancePending certificate is requested",
-					"Normal IssuancePending certificate still in a pending state, the request will be retried: Issuance is pending. You may try retrieving the certificate later using Pickup ID: test-cert-id\n\tStatus: test-status-pending",
+					"Normal IssuancePending certificate still in a pending state, the request will be retried: see controller logs for details",
 				},
 				ExpectedActions: []controllertest.Action{
 					controllertest.NewAction(coretesting.NewUpdateSubresourceAction(
@@ -515,7 +527,7 @@ func TestSign(t *testing.T) {
 								Type:               cmapi.CertificateRequestConditionReady,
 								Status:             cmmeta.ConditionFalse,
 								Reason:             cmapi.CertificateRequestReasonPending,
-								Message:            "certificate still in a pending state, the request will be retried: Issuance is pending. You may try retrieving the certificate later using Pickup ID: test-cert-id\n\tStatus: test-status-pending",
+								Message:            "certificate still in a pending state, the request will be retried: see controller logs for details",
 								LastTransitionTime: &metaFixedClockStart,
 							}),
 							gen.AddCertificateRequestAnnotations(map[string]string{cmapi.VenafiPickupIDAnnotationKey: "test"}),
@@ -533,7 +545,7 @@ func TestSign(t *testing.T) {
 				KubeObjects:        []runtime.Object{tppSecret},
 				CertManagerObjects: []runtime.Object{tppCR.DeepCopy(), tppIssuer.DeepCopy()},
 				ExpectedEvents: []string{
-					"Warning RequestError Failed to request certificate from Certificate Manager: this is an error",
+					"Warning RequestError Failed to request certificate from Certificate Manager: see controller logs for details",
 				},
 				ExpectedActions: []controllertest.Action{
 					controllertest.NewAction(coretesting.NewUpdateSubresourceAction(
@@ -545,7 +557,7 @@ func TestSign(t *testing.T) {
 								Type:               cmapi.CertificateRequestConditionReady,
 								Status:             cmmeta.ConditionFalse,
 								Reason:             cmapi.CertificateRequestReasonFailed,
-								Message:            "Failed to request certificate from Certificate Manager: this is an error",
+								Message:            "Failed to request certificate from Certificate Manager: see controller logs for details",
 								LastTransitionTime: &metaFixedClockStart,
 							}),
 							gen.SetCertificateRequestFailureTime(metaFixedClockStart),
@@ -564,7 +576,7 @@ func TestSign(t *testing.T) {
 				KubeObjects:        []runtime.Object{cloudSecret},
 				CertManagerObjects: []runtime.Object{tppCR.DeepCopy(), cloudIssuer.DeepCopy()},
 				ExpectedEvents: []string{
-					"Warning RequestError Failed to request certificate from Certificate Manager: this is an error",
+					"Warning RequestError Failed to request certificate from Certificate Manager: see controller logs for details",
 				},
 				ExpectedActions: []controllertest.Action{
 					controllertest.NewAction(coretesting.NewUpdateSubresourceAction(
@@ -576,7 +588,7 @@ func TestSign(t *testing.T) {
 								Type:               cmapi.CertificateRequestConditionReady,
 								Status:             cmmeta.ConditionFalse,
 								Reason:             cmapi.CertificateRequestReasonFailed,
-								Message:            "Failed to request certificate from Certificate Manager: this is an error",
+								Message:            "Failed to request certificate from Certificate Manager: see controller logs for details",
 								LastTransitionTime: &metaFixedClockStart,
 							}),
 							gen.SetCertificateRequestFailureTime(metaFixedClockStart),
@@ -980,4 +992,75 @@ func runTest(t *testing.T, test testT) {
 	}
 
 	test.builder.CheckAndFinish(err)
+}
+
+// errorLeaksBody reports whether err's message contains body.
+func errorLeaksBody(err error, body string) bool {
+	return strings.Contains(strings.ToLower(err.Error()), strings.ToLower(body))
+}
+
+// TestSign_DoesNotReflectUpstreamError is a regression test ensuring that
+// Sign's terminal retrieve-certificate failure path does not reflect the
+// underlying error into the CertificateRequest's Ready condition message or
+// any recorded Event.
+//
+// This is a dedicated test, rather than a sentinel embedded in an existing
+// fixture (as the client-init, request-certificate, and pending paths use in
+// TestSign above), because no pre-existing TestSign case exercises the
+// *default*, non-pending RetrieveCertificate error branch (RetrieveError).
+func TestSign_DoesNotReflectUpstreamError(t *testing.T) {
+	const sentinel = "SENTINEL-VENAFI-CR-DETAIL"
+
+	baseIssuer := gen.Issuer("test-issuer",
+		gen.SetIssuerVenafi(cmapi.VenafiIssuer{}),
+		gen.AddIssuerCondition(cmapi.IssuerCondition{
+			Type:   cmapi.IssuerConditionReady,
+			Status: cmmeta.ConditionTrue,
+		}),
+	)
+
+	newCR := func() *cmapi.CertificateRequest {
+		return gen.CertificateRequest("test-cr",
+			gen.SetCertificateRequestIssuer(cmmeta.IssuerReference{
+				Group: certmanager.GroupName,
+				Name:  baseIssuer.Name,
+				Kind:  baseIssuer.Kind,
+			}),
+		)
+	}
+
+	assertSentinelAbsent := func(t *testing.T, cr *cmapi.CertificateRequest, recorder *controllertest.FakeRecorder) {
+		t.Helper()
+		for _, c := range cr.Status.Conditions {
+			if errorLeaksBody(errors.New(c.Message), sentinel) {
+				t.Errorf("expected CertificateRequest condition message not to contain %q, but it did: %s", sentinel, c.Message)
+			}
+		}
+		for _, e := range recorder.Events {
+			if errorLeaksBody(errors.New(e), sentinel) {
+				t.Errorf("expected no recorded Event to contain %q, but got: %s", sentinel, e)
+			}
+		}
+	}
+
+	t.Run("retrieve certificate failure", func(t *testing.T) {
+		cr := newCR()
+		metav1.SetMetaDataAnnotation(&cr.ObjectMeta, cmapi.VenafiPickupIDAnnotationKey, "test-pickup-id")
+		recorder := new(controllertest.FakeRecorder)
+		v := &Venafi{
+			reporter: crutil.NewReporter(fixedClock, recorder),
+			clientBuilder: func(string, internalinformers.SecretLister, cmapi.GenericIssuer, *metrics.Metrics, logr.Logger, string) (client.Interface, error) {
+				return &internalvenafifake.Venafi{
+					RetrieveCertificateFn: func(string, []byte, time.Duration, []api.CustomField) ([]byte, error) {
+						return nil, errors.New(sentinel)
+					},
+				}, nil
+			},
+		}
+
+		if _, err := v.Sign(t.Context(), cr, baseIssuer); err == nil {
+			t.Error("expected Sign to return an error, but got none")
+		}
+		assertSentinelAbsent(t, cr, recorder)
+	})
 }

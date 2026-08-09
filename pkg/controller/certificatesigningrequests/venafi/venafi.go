@@ -111,7 +111,10 @@ func (v *Venafi) Sign(ctx context.Context, csr *certificatesv1.CertificateSignin
 	}
 
 	if err != nil {
-		message := fmt.Sprintf("Failed to initialise Certificate Manager client for signing: %s", err)
+		message := "Failed to initialise Certificate Manager client for signing"
+		// err may embed the Venafi server/SDK's raw response content,
+		// attacker-influenced since spec.venafi.*.url is tenant-controlled;
+		// keep it out of the Event.
 		v.recorder.Event(csr, corev1.EventTypeWarning, "ErrorVenafiInit", message)
 		log.Error(err, message)
 		return err
@@ -159,7 +162,8 @@ func (v *Venafi) Sign(ctx context.Context, csr *certificatesv1.CertificateSignin
 				return userr
 
 			default:
-				message := fmt.Sprintf("Failed to request Certificate Manager certificate: %s", err)
+				message := "Failed to request Certificate Manager certificate"
+				// Same reasoning as above: keep the raw response out of the Event/condition.
 				log.Error(err, message)
 				v.recorder.Event(csr, corev1.EventTypeWarning, "ErrorRequest", message)
 				util.CertificateSigningRequestSetFailed(csr, "ErrorRequest", message)
@@ -192,7 +196,8 @@ func (v *Venafi) Sign(ctx context.Context, csr *certificatesv1.CertificateSignin
 			return err
 
 		default:
-			message := fmt.Sprintf("Failed to obtain Certificate Manager certificate: %s", err)
+			message := "Failed to obtain Certificate Manager certificate"
+			// Same reasoning as above: keep the raw response out of the Event.
 			log.Error(err, message)
 			v.recorder.Event(csr, corev1.EventTypeWarning, "ErrorRetrieve", message)
 			return err
