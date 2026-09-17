@@ -33,14 +33,14 @@ import (
 // selector used for next private key Secret LISTs still excludes Secrets
 // carrying no labels at all.
 //
-// The SecretsFilteredCaching feature, which is on by default, serves part of
-// that LIST from a metadata-only cache that stores no labels, and charges one
-// live GET against the API server for every Secret it returns. A selector such
-// as labels.Everything() matches every entry in that cache, so the keymanager
-// would GET every Secret in the namespace on every reconcile.
+// The SecretsFilteredCaching feature, which is on by default, serves that LIST
+// from a typed cache holding only cert-manager's own Secrets. Every other Secret
+// in the namespace sits in a metadata-only cache that stores no labels, so a
+// selector such as labels.Everything() asks for Secrets whose labels the lister
+// has thrown away, and the lister rejects it rather than answer incompletely.
 func TestNextPrivateKeySecretSelectorRejectsUnlabeledSecret(t *testing.T) {
 	if NextPrivateKeySecretSelector.Matches(labels.Set{}) {
-		t.Error("selector must not match a Secret with no labels, or the Secret LIST will GET every Secret in the namespace")
+		t.Error("selector must not match a Secret with no labels, or the filtered lister will refuse the Secret LIST")
 	}
 	if !NextPrivateKeySecretSelector.Matches(labels.Set{cmapi.IsNextPrivateKeySecretLabelKey: "true"}) {
 		t.Error("selector must match a next private key Secret")

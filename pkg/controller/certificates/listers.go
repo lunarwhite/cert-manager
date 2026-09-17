@@ -67,6 +67,10 @@ func ListCertificatesMatchingPredicates(lister cmlisters.CertificateNamespaceLis
 // ListSecretsMatchingPredicates will list Secret resources using
 // the provided lister, optionally applying the given predicate functions to
 // filter the Secret resources returned.
+//
+// selector must require at least one label to be present: the filtered Secret
+// lister (internal/informers) refuses a selector that matches an unlabeled
+// Secret, and only ever returns Secrets cert-manager owns.
 func ListSecretsMatchingPredicates(lister corelisters.SecretNamespaceLister, selector labels.Selector, predicates ...predicate.Func[*corev1.Secret]) ([]*corev1.Secret, error) {
 	reqs, err := lister.List(selector)
 	if err != nil {

@@ -50,11 +50,11 @@ func IsNextPrivateKeySecret(secret *corev1.Secret, crt *cmapi.Certificate) bool 
 // a predicate applied after the LIST.
 //
 // The SecretsFilteredCaching feature, which is on by default, replaces the
-// Secret lister with one that serves a LIST from two caches: a typed cache of
-// cert-manager's own Secrets, which are labeled, and a metadata-only cache of
-// every other Secret in the namespace. The metadata cache stores no labels, so
-// this selector matches nothing in it. A selector that does match there costs
-// one live GET against the API server per Secret, on every reconcile.
+// Secret lister with one that serves a LIST from a typed cache of cert-manager's
+// own Secrets, which are labeled. Every other Secret in the namespace sits in a
+// metadata-only cache that stores no labels, so this selector cannot be
+// evaluated against them; one that matches the empty label set is refused for
+// that reason.
 var NextPrivateKeySecretSelector = labels.SelectorFromSet(labels.Set{
 	cmapi.IsNextPrivateKeySecretLabelKey: "true",
 })
